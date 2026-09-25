@@ -22,11 +22,11 @@ jobs:
       - name: Stored-extent regression guards
         run: edi/test.sh
       - name: Build Linux arm64 image
-        run: docker build --platform linux/arm64 -f Dockerfile.edi --build-arg SOURCE_REVISION="$GITHUB_SHA" -t "ghcr.io/ediapis/sftpgo:sha-$GITHUB_SHA" .
+        run: docker build --platform linux/arm64 -f Dockerfile.edi --build-arg SOURCE_REVISION="$GITHUB_SHA" -t "ghcr.io/bettiah/sftpgo:sha-$GITHUB_SHA" .
       - name: Publish exact source image
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
-          docker push "ghcr.io/ediapis/sftpgo:sha-$GITHUB_SHA"
+          docker push "ghcr.io/bettiah/sftpgo:sha-$GITHUB_SHA"
           docker logout ghcr.io

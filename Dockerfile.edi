@@ -16,7 +16,7 @@ COPY --from=builder /runtime/sftpgo /usr/local/bin/sftpgo
 COPY --from=builder /runtime/templates /usr/share/sftpgo/templates
 COPY --from=builder /runtime/LICENSE /runtime/NOTICE /runtime/build-inputs.env /runtime/build-provenance.json /runtime/go-build-info.txt /usr/share/sftpgo/
 ARG SOURCE_REVISION
-LABEL org.opencontainers.image.source="https://github.com/ediapis/sftpgo" \
+LABEL org.opencontainers.image.source="https://github.com/bettiah/sftpgo" \
       org.opencontainers.image.revision="$SOURCE_REVISION" \
       org.opencontainers.image.licenses="AGPL-3.0-only"
 ENV HOME=/var/lib/sftpgo SFTPGO_CONFIG_DIR=/etc/sftpgo SFTPGO_LOG_FILE_PATH="" \

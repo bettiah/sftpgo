@@ -23,7 +23,7 @@ if command -v sha256sum >/dev/null; then
 else
   digest=$(shasum -a 256 "$output/sftpgo" | cut -d ' ' -f 1)
 fi
-printf '{"schema":1,"repository":"ediapis/sftpgo","revision":"%s","go_version":"%s","build_tags":"%s","goos":"%s","goarch":"%s","binary_sha256":"%s"}\n' \
+printf '{"schema":1,"repository":"bettiah/sftpgo","revision":"%s","go_version":"%s","build_tags":"%s","goos":"%s","goarch":"%s","binary_sha256":"%s"}\n' \
   "$revision" "$SFTPGO_GO_VERSION" "$SFTPGO_BUILD_TAGS" "$(go env GOOS)" "$(go env GOARCH)" "$digest" \
   > "$output/build-provenance.json"
 go version -m "$output/sftpgo" > "$output/go-build-info.txt"

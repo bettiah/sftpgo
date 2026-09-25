@@ -27,7 +27,7 @@ while preserving admin REST. These runtime restrictions are not compile-time rem
 
 The sole active workflow is manual `EDI slim SFTPGo`; inherited upstream release and
 CodeQL workflows are disabled in this fork. It publishes
-`ghcr.io/ediapis/sftpgo:sha-FULL_COMMIT_SHA` through the workflow token. Consumers pin
+`ghcr.io/bettiah/sftpgo:sha-FULL_COMMIT_SHA` through the workflow token. Consumers pin
 the resulting digest after pulling and functionally qualifying that exact image.
 An image publication is not a deployment. No additional architectures are qualified.
 
