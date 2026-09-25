@@ -1,0 +1,26 @@
+FROM golang:1.26.8-trixie@sha256:bdca99a00bc16590cb1a0bb4e698f5fc5d6a64e4d5eef13d9f18a0ee08e5fa65 AS builder
+WORKDIR /source
+COPY . .
+ARG SOURCE_REVISION
+RUN edi/build.sh /runtime "$SOURCE_REVISION"
+
+FROM debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a
+RUN apt-get update && apt-get install --no-install-recommends -y ca-certificates media-types \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system --gid 1000 sftpgo \
+    && useradd --system --uid 1000 --gid 1000 --home-dir /var/lib/sftpgo \
+       --no-create-home --shell /usr/sbin/nologin sftpgo \
+    && mkdir -p /etc/sftpgo /var/lib/sftpgo /data/sftp /usr/share/sftpgo \
+    && chown 1000:1000 /var/lib/sftpgo /data/sftp
+COPY --from=builder /runtime/sftpgo /usr/local/bin/sftpgo
+COPY --from=builder /runtime/templates /usr/share/sftpgo/templates
+COPY --from=builder /runtime/LICENSE /runtime/NOTICE /runtime/build-inputs.env /runtime/build-provenance.json /runtime/go-build-info.txt /usr/share/sftpgo/
+ARG SOURCE_REVISION
+LABEL org.opencontainers.image.source="https://github.com/ediapis/sftpgo" \
+      org.opencontainers.image.revision="$SOURCE_REVISION" \
+      org.opencontainers.image.licenses="AGPL-3.0-only"
+ENV HOME=/var/lib/sftpgo SFTPGO_CONFIG_DIR=/etc/sftpgo SFTPGO_LOG_FILE_PATH="" \
+    SFTPGO_SMTP__TEMPLATES_PATH=/usr/share/sftpgo/templates
+WORKDIR /var/lib/sftpgo
+USER 1000:1000
+CMD ["sftpgo", "serve"]

@@ -1074,6 +1074,11 @@ func IsSFTPFs(fs Fs) bool {
 	return strings.HasPrefix(fs.Name(), sftpFsName)
 }
 
+// IsS3Fs returns true if fs is an S3 filesystem, including a resolved virtual folder.
+func IsS3Fs(fs Fs) bool {
+	return strings.HasPrefix(fs.Name(), s3fsName)
+}
+
 // IsHTTPFs returns true if fs is an HTTP filesystem
 func IsHTTPFs(fs Fs) bool {
 	return strings.HasPrefix(fs.Name(), httpFsName)

@@ -141,6 +141,17 @@ func (t *transfer) WriteAt(p []byte, off int64) (n int, err error) {
 		t.TransferError(err)
 		return 0, err
 	}
+	// An S3 upload can be sparse: received bytes do not bound its stored extent.
+	// Check the authenticated absolute file limit before handing data to the writer.
+	if limit := t.Connection.User.Filters.MaxUploadFileSize; limit > 0 && vfs.IsS3Fs(t.Fs) &&
+		(off < 0 || off > limit || int64(len(p)) > limit-off) {
+		// The packet already arrived over SFTP. Preserve received-byte accounting,
+		// including failed uploads, without allowing these bytes into the writer.
+		t.BytesReceived.Add(int64(len(p)))
+		err = t.Connection.GetQuotaExceededError()
+		t.TransferError(err)
+		return 0, t.ConvertError(err)
+	}
 
 	n, err = t.writerAt.WriteAt(p, off)
 	t.BytesReceived.Add(int64(n))

@@ -1,0 +1,32 @@
+name: EDI slim SFTPGo
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  publish:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - id: profile
+        run: |
+          source edi/build-inputs.env
+          echo "go_version=${SFTPGO_GO_VERSION#go}" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: ${{ steps.profile.outputs.go_version }}
+      - name: Stored-extent regression guards
+        run: edi/test.sh
+      - name: Build Linux arm64 image
+        run: docker build --platform linux/arm64 -f Dockerfile.edi --build-arg SOURCE_REVISION="$GITHUB_SHA" -t "ghcr.io/ediapis/sftpgo:sha-$GITHUB_SHA" .
+      - name: Publish exact source image
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker push "ghcr.io/ediapis/sftpgo:sha-$GITHUB_SHA"
+          docker logout ghcr.io
