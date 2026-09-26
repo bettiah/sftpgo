@@ -817,6 +817,13 @@ func (fs *S3Fs) hasContents(name string) (bool, error) {
 	return false, nil
 }
 
+// A lost upload response does not prove that S3 rejected the write. Do not let SDK
+// retries allocate another upload or object version. Parts retain the configured
+// retries because they replace the same UploadId/part number with the same bytes.
+func singleUploadAttempt(options *s3.Options) {
+	options.RetryMaxAttempts = 1
+}
+
 func (fs *S3Fs) initiateMultipartUpload(ctx context.Context, name, contentType string) (string, error) {
 	ctx, cancelFn := context.WithDeadline(ctx, time.Now().Add(fs.ctxTimeout))
 	defer cancelFn()
@@ -830,7 +837,7 @@ func (fs *S3Fs) initiateMultipartUpload(ctx context.Context, name, contentType s
 		SSECustomerKey:       util.NilIfEmpty(fs.sseCustomerKey),
 		SSECustomerAlgorithm: util.NilIfEmpty(fs.sseCustomerAlgo),
 		SSECustomerKeyMD5:    util.NilIfEmpty(fs.sseCustomerKeyMD5),
-	})
+	}, singleUploadAttempt)
 	if err != nil {
 		return "", fmt.Errorf("unable to create multipart upload request: %w", err)
 	}
@@ -876,7 +883,7 @@ func (fs *S3Fs) completeMultipartUpload(ctx context.Context, name, uploadID stri
 		MultipartUpload: &types.CompletedMultipartUpload{
 			Parts: completedParts,
 		},
-	})
+	}, singleUploadAttempt)
 	return err
 }
 
@@ -912,7 +919,7 @@ func (fs *S3Fs) singlePartUpload(ctx context.Context, name, contentType string, 
 		SSECustomerAlgorithm: util.NilIfEmpty(fs.sseCustomerAlgo),
 		SSECustomerKeyMD5:    util.NilIfEmpty(fs.sseCustomerKeyMD5),
 		StorageClass:         types.StorageClass(fs.config.StorageClass),
-	})
+	}, singleUploadAttempt)
 	return err
 }
 
