@@ -321,36 +321,68 @@ func (r *stagingShortReader) Read(p []byte) (int, error) {
 	return r.pipeReaderAt.Read(p)
 }
 
-func TestEDIStagingNegativeReadOffset(t *testing.T) {
-	r, w, err := createPipeFn(t.TempDir(), 0)
-	if err != nil {
-		t.Fatal(err)
+// Model Linux rejecting an overflowing pread even when the host returns EOF.
+type stagingOverflowReader struct {
+	pipeReaderAt
+	overflowCalls int
+}
+
+func (r *stagingOverflowReader) ReadAt(p []byte, off int64) (int, error) {
+	if off >= 0 && int64(len(p)) > math.MaxInt64-off {
+		r.overflowCalls++
+		return 0, errors.New("injected overflowing read error")
 	}
-	defer func() { r.Close(); w.Close() }()
-	want := []byte("hello")
-	// Leave one extra byte: pipeat waits at the exact extent while the writer is open.
-	if _, err := w.WriteAt([]byte("hello!"), 0); err != nil {
-		t.Fatal(err)
-	}
-	var logs bytes.Buffer
-	old := *logger.GetLogger()
-	*logger.GetLogger() = zerolog.New(&logs).Level(zerolog.ErrorLevel)
-	defer func() { *logger.GetLogger() = old }()
-	before := stagingCounter(t)
-	buf := make([]byte, len(want))
-	for _, off := range []int64{math.MinInt64, -1} {
-		if n, err := r.ReadAt(buf, off); n != 0 || err == nil || errors.Is(err, ErrStagingWrite) {
-			t.Errorf("negative offset %d: n=%d err=%v, want ordinary error", off, n, err)
-		}
-	}
-	if n, err := r.ReadAt(buf, 0); n != len(want) || err != nil || !bytes.Equal(buf, want) {
-		t.Errorf("subsequent read: n=%d data=%x err=%v, want %x", n, buf, err, want)
-	}
-	if delta := stagingCounter(t) - before; delta != 0 {
-		t.Errorf("counter delta=%v, want 0", delta)
-	}
-	if logs.Len() != 0 {
-		t.Errorf("unexpected Error log: %s", logs.String())
+	return r.pipeReaderAt.ReadAt(p, off)
+}
+
+func TestEDIStagingInvalidReadOffset(t *testing.T) {
+	for _, mode := range []string{"real", "shim"} {
+		t.Run(mode, func(t *testing.T) {
+			var fault *stagingOverflowReader
+			if mode == "shim" {
+				original := stagingPipeInDir
+				stagingPipeInDir = func(dir string) (pipeReaderAt, pipeWriterAt, error) {
+					r, w, err := pipeat.PipeInDir(dir)
+					fault = &stagingOverflowReader{pipeReaderAt: r}
+					return fault, w, err
+				}
+				t.Cleanup(func() { stagingPipeInDir = original })
+			}
+			r, w, err := createPipeFn(t.TempDir(), 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { r.Close(); w.Close() }()
+			want := []byte("hello")
+			// Leave one extra byte: pipeat waits at the exact extent while the writer is open.
+			if _, err := w.WriteAt([]byte("hello!"), 0); err != nil {
+				t.Fatal(err)
+			}
+			var logs bytes.Buffer
+			old := *logger.GetLogger()
+			*logger.GetLogger() = zerolog.New(&logs).Level(zerolog.ErrorLevel)
+			defer func() { *logger.GetLogger() = old }()
+			before := stagingCounter(t)
+			buf := make([]byte, 32768)
+			for _, off := range []int64{math.MinInt64, -1, math.MaxInt64, math.MaxInt64 - int64(len(buf)) + 1} {
+				if n, err := r.ReadAt(buf, off); n != 0 || err == nil || errors.Is(err, ErrStagingWrite) {
+					t.Errorf("invalid offset %d: n=%d err=%v, want ordinary error", off, n, err)
+				}
+			}
+			buf = buf[:len(want)]
+			if n, err := r.ReadAt(buf, 0); n != len(want) || err != nil || !bytes.Equal(buf, want) {
+				t.Errorf("subsequent read: n=%d data=%x err=%v, want %x", n, buf, err, want)
+			}
+			if delta := stagingCounter(t) - before; delta != 0 {
+				t.Errorf("counter delta=%v, want 0", delta)
+			}
+			if logs.Len() != 0 {
+				t.Errorf("unexpected Error log: %s", logs.String())
+			}
+			if fault != nil && fault.overflowCalls != 0 {
+				t.Errorf("overflowing reads reached inner reader: %d", fault.overflowCalls)
+			}
+		})
 	}
 }
 

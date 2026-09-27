@@ -5,6 +5,7 @@ package vfs
 import (
 	"errors"
 	"io"
+	"math"
 	"sync/atomic"
 
 	"github.com/drakkan/sftpgo/v2/internal/logger"
@@ -41,8 +42,8 @@ type stagingReader struct {
 }
 
 func (r *stagingReader) ReadAt(p []byte, off int64) (int, error) {
-	if off < 0 {
-		return 0, errors.New("negative offset")
+	if off < 0 || int64(len(p)) > math.MaxInt64-off {
+		return 0, errors.New("invalid read offset")
 	}
 	if r.state.failed.Load() {
 		return 0, ErrStagingWrite
