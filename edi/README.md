@@ -53,6 +53,7 @@ Pipeat discards the errno, so this counts staging failures, not specifically ENO
 Normal reader/writer closure is excluded.
 An EOF short of the highest written offset also fails the pipe and increments the same
 counter, detecting staging read errors hidden by pipeat after a clean download close.
+A raw staging read error while the writer is open also fails the pipe and increments `sftpgo_staging_errors_total`; negative read offsets are rejected without failing the pipe or counting a staging error.
 
 SSH external-auth transport errors, timeouts, non-200 responses, program failures,
 invalid JSON and user save/validation failures after acceptance no longer score against

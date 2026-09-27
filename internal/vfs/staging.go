@@ -41,6 +41,9 @@ type stagingReader struct {
 }
 
 func (r *stagingReader) ReadAt(p []byte, off int64) (int, error) {
+	if off < 0 {
+		return 0, errors.New("negative offset")
+	}
 	if r.state.failed.Load() {
 		return 0, ErrStagingWrite
 	}

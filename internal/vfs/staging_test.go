@@ -8,6 +8,7 @@ import (
 	"github.com/drakkan/sftpgo/v2/internal/logger"
 	"github.com/rs/zerolog"
 	"io"
+	"math"
 	"strings"
 	"sync"
 	"testing"
@@ -318,6 +319,39 @@ func (r *stagingShortReader) Read(p []byte) (int, error) {
 		return 1, io.EOF // A partial read must discard its bytes too.
 	}
 	return r.pipeReaderAt.Read(p)
+}
+
+func TestEDIStagingNegativeReadOffset(t *testing.T) {
+	r, w, err := createPipeFn(t.TempDir(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { r.Close(); w.Close() }()
+	want := []byte("hello")
+	// Leave one extra byte: pipeat waits at the exact extent while the writer is open.
+	if _, err := w.WriteAt([]byte("hello!"), 0); err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	old := *logger.GetLogger()
+	*logger.GetLogger() = zerolog.New(&logs).Level(zerolog.ErrorLevel)
+	defer func() { *logger.GetLogger() = old }()
+	before := stagingCounter(t)
+	buf := make([]byte, len(want))
+	for _, off := range []int64{math.MinInt64, -1} {
+		if n, err := r.ReadAt(buf, off); n != 0 || err == nil || errors.Is(err, ErrStagingWrite) {
+			t.Errorf("negative offset %d: n=%d err=%v, want ordinary error", off, n, err)
+		}
+	}
+	if n, err := r.ReadAt(buf, 0); n != len(want) || err != nil || !bytes.Equal(buf, want) {
+		t.Errorf("subsequent read: n=%d data=%x err=%v, want %x", n, buf, err, want)
+	}
+	if delta := stagingCounter(t) - before; delta != 0 {
+		t.Errorf("counter delta=%v, want 0", delta)
+	}
+	if logs.Len() != 0 {
+		t.Errorf("unexpected Error log: %s", logs.String())
+	}
 }
 
 func TestEDIStagingReadErrorWhileWriting(t *testing.T) {

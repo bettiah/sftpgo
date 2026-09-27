@@ -59,9 +59,18 @@ func TestEDIStagingS3DownloadSuccess(t *testing.T) {
 	}
 	defer cancel()
 	defer r.Close()
-	got, err := io.ReadAll(r)
-	if err != nil || !bytes.Equal(got, want) {
-		t.Errorf("download=%x err=%v, want %x and no error", got, err, want)
+	var got []byte
+	buf := make([]byte, 5)
+	for {
+		var n int
+		n, err = r.Read(buf)
+		got = append(got, buf[:n]...)
+		if err != nil {
+			break
+		}
+	}
+	if err != io.EOF || !bytes.Equal(got, want) {
+		t.Errorf("download=%x err=%v, want %x and EOF", got, err, want)
 	}
 	if delta := stagingCounter(t) - before; delta != 0 {
 		t.Errorf("counter delta=%v, want 0", delta)
