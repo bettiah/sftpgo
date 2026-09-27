@@ -47,7 +47,7 @@ func stagingCounter(t *testing.T) float64 {
 		t.Fatal(err)
 	}
 	for _, f := range families {
-		if f.GetName() == "sftpgo_staging_write_errors_total" {
+		if f.GetName() == "sftpgo_staging_errors_total" {
 			if len(f.Metric) != 1 || len(f.Metric[0].Label) != 0 {
 				t.Fatal("staging metric must be unlabelled")
 			}
@@ -297,20 +297,59 @@ func (r *stagingClosingReader) CloseWithError(err error) error {
 // Model pipeat masking a disk read error with the clean writer's io.EOF.
 type stagingShortReader struct {
 	pipeReaderAt
-	fail bool
+	fail    bool
+	failure error
 }
 
 func (r *stagingShortReader) ReadAt(p []byte, off int64) (int, error) {
 	if r.fail {
+		if r.failure != nil {
+			return 0, r.failure
+		}
 		return 0, io.EOF
 	}
 	return r.pipeReaderAt.ReadAt(p, off)
 }
 func (r *stagingShortReader) Read(p []byte) (int, error) {
 	if r.fail {
+		if r.failure != nil {
+			return 1, r.failure
+		}
 		return 1, io.EOF // A partial read must discard its bytes too.
 	}
 	return r.pipeReaderAt.Read(p)
+}
+
+func TestEDIStagingReadErrorWhileWriting(t *testing.T) {
+	for _, sequential := range []bool{false, true} {
+		t.Run(map[bool]string{false: "ReadAt", true: "Read"}[sequential], func(t *testing.T) {
+			fault := &stagingShortReader{fail: true, failure: errors.New("injected disk read error")}
+			r := &stagingReader{pipeReaderAt: fault, state: &stagingPipeState{}}
+			var logs bytes.Buffer
+			old := *logger.GetLogger()
+			*logger.GetLogger() = zerolog.New(&logs).Level(zerolog.ErrorLevel)
+			defer func() { *logger.GetLogger() = old }()
+			before := stagingCounter(t)
+			for i := 0; i < 3; i++ {
+				var n int
+				var err error
+				if sequential {
+					n, err = r.Read(make([]byte, 8))
+				} else {
+					n, err = r.ReadAt(make([]byte, 8), 0)
+				}
+				if n != 0 || !errors.Is(err, ErrStagingWrite) {
+					t.Errorf("staging read: n=%d err=%v", n, err)
+				}
+			}
+			if delta := stagingCounter(t) - before; delta != 1 {
+				t.Errorf("counter delta=%v, want 1", delta)
+			}
+			if n := strings.Count(logs.String(), `"level":"error"`); n != 1 {
+				t.Errorf("Error logs=%d: %s", n, logs.String())
+			}
+		})
+	}
 }
 
 func TestEDIStagingPrematureEOF(t *testing.T) {

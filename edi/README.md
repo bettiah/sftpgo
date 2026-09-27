@@ -48,7 +48,7 @@ failure followed by a successful retry: the failure flag stays set. The pipe wra
 prevents holes, truncation and zero-length "successful" downloads by converting
 pipeat's ambiguous write EOF to a staging error and rejecting subsequent reads.
 Uploads and downloads return `SSH_FX_FAILURE`. The wrapper logs once at Error per
-failed pipe and increments the unlabelled `sftpgo_staging_write_errors_total` once.
+failed pipe and increments the unlabelled `sftpgo_staging_errors_total` once.
 Pipeat discards the errno, so this counts staging failures, not specifically ENOSPC.
 Normal reader/writer closure is excluded.
 An EOF short of the highest written offset also fails the pipe and increments the same
@@ -64,7 +64,9 @@ abandonment remains unscored; a hook hang crossing the handshake deadline can st
 score `NoLoginTried`. Both residual scoring cases are inert at `score_no_auth: 0`;
 N1c is deferred to the release that considers raising it. SSH `max_sessions` refusals
 after successful credential checks do not score for password, keyboard-interactive
-or public-key auth.
+or public-key auth; because the cap precedes the login-method, 2FA and address
+filters, valid credentials those filters would refuse also get an unscored session
+refusal while the user is at its cap.
 
 `sftpd.handshake_timeout` is the SSH login grace period in seconds (default 120;
 0 uses 120; negatives and 1–9 fail startup). It covers version exchange, KEX and

@@ -1,5 +1,6 @@
 //go:build edi
 
+// Run file-scoped via edi/test.sh only; package-mode -tags edi contaminates globals.
 package sftpd
 
 import (

@@ -12,9 +12,9 @@ import (
 	"github.com/eikenb/pipeat"
 )
 
-// ErrStagingWrite means a staging write failed or a read ended before the written
-// extent. pipeat loses the underlying errno, so this is not specifically ENOSPC.
-var ErrStagingWrite = errors.New("temporary staging write failed")
+// ErrStagingWrite means staging I/O failed or a read ended before the written
+// extent. pipeat can lose the underlying errno, so this is not specifically ENOSPC.
+var ErrStagingWrite = errors.New("temporary staging I/O failed")
 
 var stagingPipeInDir = func(dir string) (pipeReaderAt, pipeWriterAt, error) {
 	return pipeat.PipeInDir(dir)
@@ -29,7 +29,7 @@ type stagingPipeState struct {
 
 func (s *stagingPipeState) fail() {
 	if s.failed.CompareAndSwap(false, true) {
-		metric.AddStagingWriteError()
+		metric.AddStagingError()
 		logger.Error("staging", "", "%v", ErrStagingWrite)
 	}
 }
@@ -49,6 +49,10 @@ func (r *stagingReader) ReadAt(p []byte, off int64) (int, error) {
 }
 
 func (r *stagingReader) readResult(n int, err error, off int64) (int, error) {
+	// While the writer is open, pipeat preserves raw file read errors.
+	if err != nil && err != io.EOF && !r.state.readerClosed.Load() && !r.state.writerClosed.Load() {
+		r.state.fail()
+	}
 	// After a clean writer close pipeat masks file read errors as EOF. Bytes
 	// already written must remain readable; cancellation is not a disk failure.
 	if err == io.EOF && !r.state.readerClosed.Load() && off+int64(n) < r.state.writtenEnd.Load() {

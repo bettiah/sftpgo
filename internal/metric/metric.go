@@ -41,9 +41,9 @@ func init() {
 }
 
 var (
-	stagingWriteErrors = promauto.NewCounter(prometheus.CounterOpts{
-		Name: "sftpgo_staging_write_errors_total",
-		Help: "Number of staging pipes with a write failure",
+	stagingErrors = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "sftpgo_staging_errors_total",
+		Help: "Number of staging pipes that failed (write, read or premature end)",
 	})
 	sshPreauthConnections = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "sftpgo_ssh_preauth_connections",
@@ -1019,8 +1019,8 @@ func UpdateActiveConnectionsSize(size int) {
 	activeConnections.Set(float64(size))
 }
 
-// AddStagingWriteError counts one failed staging pipe.
-func AddStagingWriteError() { stagingWriteErrors.Inc() }
+// AddStagingError counts one failed staging pipe.
+func AddStagingError() { stagingErrors.Inc() }
 
 // AddSSHPreauthConnection adjusts the number of SSH handshakes in progress.
 func AddSSHPreauthConnection(delta int) { sshPreauthConnections.Add(float64(delta)) }
