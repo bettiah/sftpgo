@@ -55,7 +55,9 @@ An EOF short of the highest written offset also fails the pipe and increments th
 counter, detecting staging read errors hidden by pipeat after a clean download close.
 A raw staging read error while the writer is open also fails the pipe and increments
 `sftpgo_staging_errors_total`; negative or overflowing read offsets are rejected without
-failing the pipe or counting a staging error.
+failing the pipe or counting a staging error. Upload write offsets are client-chosen and
+have no such guard: set `max_upload_file_size`, which refuses out-of-range writes before
+they reach the staging file, or they count as staging errors.
 
 SSH external-auth transport errors, timeouts, non-200 responses, program failures,
 invalid JSON and user save/validation failures after acceptance no longer score against
