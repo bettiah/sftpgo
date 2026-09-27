@@ -99,6 +99,7 @@ before authentication completes, excluding the PROXY header wait, and is release
 success, failure, deadline, close or panic. `sftpgo_capacity_refusals_total{limit}`
 counts capacity refusals only, with `limit` equal to `max_total_connections`,
 `max_per_host_connections` or `max_total_transfers`; safelisted overruns are excluded.
+All three `limit` series are exported at 0 from startup.
 There are no IP, username, path or stage labels. The existing shared connection limit
 also applies to HTTP admin requests, so `limit="max_total_connections"` includes their
 refusals. An SSH pre-auth flood can still impede admin REST under that shared limit.

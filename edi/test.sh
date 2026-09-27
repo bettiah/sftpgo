@@ -6,6 +6,7 @@ export GOTOOLCHAIN=$SFTPGO_GO_VERSION GOFLAGS=-mod=readonly
 # Tests that initialize process globals must be tag-isolated from upstream suites.
 # Run edi-tagged tests file-scoped via this script only; package-mode -tags edi contaminates globals.
 # File-scoped: upstream package TestMain starts unrelated providers/listeners.
+go test -race -tags "edi,$SFTPGO_BUILD_TAGS" internal/metric/edi_capacity_test.go
 go test -race -tags "edi,$SFTPGO_BUILD_TAGS" internal/sftpd/transfer.go internal/sftpd/stored_extent_test.go
 go test -race -tags "edi,nos3,$SFTPGO_BUILD_TAGS" internal/sftpd/transfer.go internal/sftpd/stored_extent_test.go
 go test -race -tags "$SFTPGO_BUILD_TAGS" ./internal/vfs -run '^TestS3(Upload|Complete|Read|Credential)'

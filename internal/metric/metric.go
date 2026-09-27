@@ -38,6 +38,9 @@ const (
 
 func init() {
 	version.AddFeature("+metrics")
+	for _, limit := range capacityLimits {
+		capacityRefusals.WithLabelValues(limit)
+	}
 }
 
 var (

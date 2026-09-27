@@ -1312,7 +1312,7 @@ func (conns *ActiveConnections) ReserveTransfer(username string) (func(), error)
 		return nil, err
 	}
 	if Config.MaxTotalTransfers > 0 && int(conns.transfers.getTotal())+conns.pendingTransfers >= Config.MaxTotalTransfers {
-		metric.AddCapacityRefusal("max_total_transfers")
+		metric.AddCapacityRefusal(metric.CapacityLimitTotalTransfers)
 		return nil, ErrTransferLimit
 	}
 	conns.pendingTransfers++
@@ -1337,14 +1337,14 @@ func (conns *ActiveConnections) IsNewTransferAllowed(username string) error {
 	}
 	if Config.MaxPerHostConnections > 0 {
 		if transfers := conns.transfers.getTotalFrom(username); transfers >= Config.MaxPerHostConnections {
-			metric.AddCapacityRefusal("max_per_host_connections")
+			metric.AddCapacityRefusal(metric.CapacityLimitPerHostConnections)
 			logger.Info(logSender, "", "active transfers from user %q: %d/%d", username, transfers, Config.MaxPerHostConnections)
 			return ErrConnectionDenied
 		}
 	}
 	if Config.MaxTotalConnections > 0 {
 		if transfers := conns.transfers.getTotal(); transfers >= int32(Config.MaxTotalConnections) {
-			metric.AddCapacityRefusal("max_total_connections")
+			metric.AddCapacityRefusal(metric.CapacityLimitTotalConnections)
 			logger.Info(logSender, "", "active transfers %d/%d", transfers, Config.MaxTotalConnections)
 			return ErrConnectionDenied
 		}
@@ -1377,7 +1377,7 @@ func (conns *ActiveConnections) IsNewConnectionAllowed(ipAddr, protocol string) 
 	if Config.MaxPerHostConnections > 0 {
 		if total := conns.clients.getTotalFrom(ipAddr); total > Config.MaxPerHostConnections {
 			if !AddDefenderEvent(ipAddr, protocol, HostEventLimitExceeded) {
-				metric.AddCapacityRefusal("max_per_host_connections")
+				metric.AddCapacityRefusal(metric.CapacityLimitPerHostConnections)
 				logger.Warn(logSender, "", "connection denied, active connections from IP %q: %d/%d",
 					ipAddr, total, Config.MaxPerHostConnections)
 				return ErrConnectionDenied
@@ -1388,7 +1388,7 @@ func (conns *ActiveConnections) IsNewConnectionAllowed(ipAddr, protocol string) 
 
 	if Config.MaxTotalConnections > 0 {
 		if total := conns.clients.getTotal(); total > int32(Config.MaxTotalConnections) {
-			metric.AddCapacityRefusal("max_total_connections")
+			metric.AddCapacityRefusal(metric.CapacityLimitTotalConnections)
 			logger.Info(logSender, "", "active client connections %d/%d", total, Config.MaxTotalConnections)
 			return ErrConnectionDenied
 		}
@@ -1396,7 +1396,7 @@ func (conns *ActiveConnections) IsNewConnectionAllowed(ipAddr, protocol string) 
 		// on a single SFTP connection we could have multiple SFTP channels or commands
 		// so we check the estabilished connections and active uploads too
 		if transfers := conns.transfers.getTotal(); transfers >= int32(Config.MaxTotalConnections) {
-			metric.AddCapacityRefusal("max_total_connections")
+			metric.AddCapacityRefusal(metric.CapacityLimitTotalConnections)
 			logger.Info(logSender, "", "active transfers %d/%d", transfers, Config.MaxTotalConnections)
 			return ErrConnectionDenied
 		}
@@ -1405,7 +1405,7 @@ func (conns *ActiveConnections) IsNewConnectionAllowed(ipAddr, protocol string) 
 		defer conns.RUnlock()
 
 		if sess := len(conns.connections); sess >= Config.MaxTotalConnections {
-			metric.AddCapacityRefusal("max_total_connections")
+			metric.AddCapacityRefusal(metric.CapacityLimitTotalConnections)
 			logger.Info(logSender, "", "active client sessions %d/%d", sess, Config.MaxTotalConnections)
 			return ErrConnectionDenied
 		}
