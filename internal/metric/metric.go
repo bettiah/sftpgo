@@ -38,6 +38,13 @@ const (
 
 func init() {
 	version.AddFeature("+metrics")
+	for _, limit := range []string{
+		CapacityLimitTotalConnections,
+		CapacityLimitPerHostConnections,
+		CapacityLimitTotalTransfers,
+	} {
+		capacityRefusals.WithLabelValues(limit)
+	}
 }
 
 var (
