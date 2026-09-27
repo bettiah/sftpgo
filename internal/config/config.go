@@ -220,6 +220,7 @@ func Init() {
 			PostConnectHook:       "",
 			PostDisconnectHook:    "",
 			MaxTotalConnections:   0,
+			MaxTotalTransfers:     0,
 			MaxPerHostConnections: 20,
 			AllowListStatus:       0,
 			AllowSelfConnections:  0,
@@ -271,6 +272,7 @@ func Init() {
 		SFTPD: sftpd.Configuration{
 			Bindings:                          []sftpd.Binding{defaultSFTPDBinding},
 			MaxAuthTries:                      0,
+			HandshakeTimeout:                  120,
 			HostKeys:                          []string{},
 			HostCertificates:                  []string{},
 			HostKeyAlgorithms:                 []string{},
@@ -2065,6 +2067,7 @@ func setViperDefaults() {
 	viper.SetDefault("common.post_connect_hook", globalConf.Common.PostConnectHook)
 	viper.SetDefault("common.post_disconnect_hook", globalConf.Common.PostDisconnectHook)
 	viper.SetDefault("common.max_total_connections", globalConf.Common.MaxTotalConnections)
+	viper.SetDefault("common.max_total_transfers", globalConf.Common.MaxTotalTransfers)
 	viper.SetDefault("common.max_per_host_connections", globalConf.Common.MaxPerHostConnections)
 	viper.SetDefault("common.allowlist_status", globalConf.Common.AllowListStatus)
 	viper.SetDefault("common.allow_self_connections", globalConf.Common.AllowSelfConnections)
@@ -2098,6 +2101,7 @@ func setViperDefaults() {
 	viper.SetDefault("acme.http01_challenge.proxy_header", globalConf.ACME.HTTP01Challenge.ProxyHeader)
 	viper.SetDefault("acme.tls_alpn01_challenge.port", globalConf.ACME.TLSALPN01Challenge.Port)
 	viper.SetDefault("sftpd.max_auth_tries", globalConf.SFTPD.MaxAuthTries)
+	viper.SetDefault("sftpd.handshake_timeout", globalConf.SFTPD.HandshakeTimeout)
 	viper.SetDefault("sftpd.host_keys", globalConf.SFTPD.HostKeys)
 	viper.SetDefault("sftpd.host_certificates", globalConf.SFTPD.HostCertificates)
 	viper.SetDefault("sftpd.host_key_algorithms", globalConf.SFTPD.HostKeyAlgorithms)

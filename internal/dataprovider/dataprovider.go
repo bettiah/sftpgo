@@ -180,6 +180,8 @@ var (
 	MFAProtocols = []string{protocolHTTP, protocolSSH, protocolFTP}
 	// ErrNoInitRequired defines the error returned by InitProvider if no inizialization/update is required
 	ErrNoInitRequired = errors.New("the data provider is up to date")
+	// ErrExternalAuthUnavailable identifies hook/backend failures rather than credential verdicts.
+	ErrExternalAuthUnavailable = errors.New("external authentication unavailable")
 	// ErrInvalidCredentials defines the error to return if the supplied credentials are invalid
 	ErrInvalidCredentials = errors.New("invalid credentials")
 	// ErrLoginNotAllowedFromIP defines the error to return if login is denied from the current IP
@@ -4550,7 +4552,7 @@ func doExternalAuth(username, password string, pubKey []byte, keyboardInteractiv
 	startTime := time.Now()
 	out, err := getExternalAuthResponse(username, password, pkey, keyboardInteractive, ip, protocol, tlsCert, u)
 	if err != nil {
-		return user, fmt.Errorf("external auth error for user %q, elapsed: %s: %w", username, time.Since(startTime), err)
+		return user, fmt.Errorf("external auth error for user %q, elapsed: %s: %w: %w", username, time.Since(startTime), ErrExternalAuthUnavailable, err)
 	}
 	providerLog(logger.LevelDebug, "external auth completed for user %q, elapsed: %s", username, time.Since(startTime))
 	if util.IsByteArrayEmpty(out) {
@@ -4564,7 +4566,7 @@ func doExternalAuth(username, password string, pubKey []byte, keyboardInteractiv
 	}
 	err = json.Unmarshal(out, &user)
 	if err != nil {
-		return user, fmt.Errorf("invalid external auth response: %v", err)
+		return user, fmt.Errorf("invalid external auth response: %w: %w", ErrExternalAuthUnavailable, err)
 	}
 	// an empty username means authentication failure
 	if user.Username == "" {
@@ -4601,14 +4603,20 @@ func doExternalAuth(username, password string, pubKey []byte, keyboardInteractiv
 				webDAVUsersCache.swap(&user, password)
 			}
 			cachedUserPasswords.Add(user.Username, password, user.Password)
+		} else {
+			err = fmt.Errorf("%w: %w", ErrExternalAuthUnavailable, err)
 		}
 		return user, err
 	}
 	err = provider.addUser(&user)
 	if err != nil {
-		return user, err
+		return user, fmt.Errorf("%w: %w", ErrExternalAuthUnavailable, err)
 	}
-	return provider.userExists(user.Username, "")
+	user, err = provider.userExists(user.Username, "")
+	if err != nil {
+		return user, fmt.Errorf("%w: %w", ErrExternalAuthUnavailable, err)
+	}
+	return user, nil
 }
 
 func doPluginAuth(username, password string, pubKey []byte, ip, protocol string,

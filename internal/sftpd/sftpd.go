@@ -27,8 +27,8 @@ import (
 )
 
 const (
-	logSender        = "sftpd"
-	handshakeTimeout = 2 * time.Minute
+	logSender               = "sftpd"
+	defaultHandshakeTimeout = 2 * time.Minute
 )
 
 var (

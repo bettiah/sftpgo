@@ -1,3 +1,6 @@
+//go:build edi
+
+// Run file-scoped via edi/test.sh only; package-mode -tags edi contaminates globals.
 // Copyright (C) 2026 EDI Platform contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 package sftpd
