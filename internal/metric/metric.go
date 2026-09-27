@@ -41,6 +41,19 @@ func init() {
 }
 
 var (
+	stagingWriteErrors = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "sftpgo_staging_write_errors_total",
+		Help: "Number of staging pipes with a write failure",
+	})
+	sshPreauthConnections = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "sftpgo_ssh_preauth_connections",
+		Help: "Accepted SSH connections awaiting authentication",
+	})
+	capacityRefusals = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "sftpgo_capacity_refusals_total",
+		Help: "Capacity refusals by configuration limit",
+	}, []string{"limit"})
+
 	// dataproviderAvailability is the metric that reports the availability for the configured data provider
 	dataproviderAvailability = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "sftpgo_dataprovider_availability",
@@ -1005,3 +1018,12 @@ func HTTPRequestServed(status int) {
 func UpdateActiveConnectionsSize(size int) {
 	activeConnections.Set(float64(size))
 }
+
+// AddStagingWriteError counts one failed staging pipe.
+func AddStagingWriteError() { stagingWriteErrors.Inc() }
+
+// AddSSHPreauthConnection adjusts the number of SSH handshakes in progress.
+func AddSSHPreauthConnection(delta int) { sshPreauthConnections.Add(float64(delta)) }
+
+// AddCapacityRefusal counts a refusal. Callers supply only fixed config key names.
+func AddCapacityRefusal(limit string) { capacityRefusals.WithLabelValues(limit).Inc() }

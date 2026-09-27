@@ -320,6 +320,10 @@ func (t *BaseTransfer) TransferError(err error) {
 	if t.cancelFn != nil {
 		t.cancelFn()
 	}
+	// The staging wrapper has already logged this failure once per pipe.
+	if errors.Is(err, vfs.ErrStagingWrite) {
+		return
+	}
 	elapsed := time.Since(t.start).Nanoseconds() / 1000000
 	t.Connection.Log(logger.LevelError, "Unexpected error for transfer, path: %q, error: \"%v\" bytes sent: %v, "+
 		"bytes received: %v transfer running since %v ms", t.fsPath, t.ErrTransfer, t.BytesSent.Load(),
@@ -431,7 +435,7 @@ func (t *BaseTransfer) Close() error {
 	if t.transferType == TransferDownload {
 		logger.TransferLog(downloadLogSender, t.fsPath, t.requestPath, elapsed, t.BytesSent.Load(), t.Connection.User.Username,
 			t.Connection.ID, t.Connection.protocol, t.Connection.localAddr, t.Connection.remoteAddr, t.ftpMode,
-			t.ErrTransfer)
+			t.ErrTransfer, errors.Is(t.ErrTransfer, vfs.ErrStagingWrite))
 		_ = ExecuteActionNotification(t.Connection, operationDownload, t.fsPath, t.requestPath, "", "", "",
 			t.BytesSent.Load(), t.ErrTransfer, elapsed, t.metadata)
 	} else {
@@ -453,11 +457,13 @@ func (t *BaseTransfer) Close() error {
 		t.updateTimes()
 		logger.TransferLog(uploadLogSender, t.fsPath, t.requestPath, elapsed, t.BytesReceived.Load(), t.Connection.User.Username,
 			t.Connection.ID, t.Connection.protocol, t.Connection.localAddr, t.Connection.remoteAddr, t.ftpMode,
-			t.ErrTransfer)
+			t.ErrTransfer, errors.Is(t.ErrTransfer, vfs.ErrStagingWrite))
 	}
 	if t.ErrTransfer != nil {
 		t.finalInfo = nil
-		t.Connection.Log(logger.LevelError, "transfer error: %v, path: %q", t.ErrTransfer, t.fsPath)
+		if !errors.Is(t.ErrTransfer, vfs.ErrStagingWrite) {
+			t.Connection.Log(logger.LevelError, "transfer error: %v, path: %q", t.ErrTransfer, t.fsPath)
+		}
 		if err == nil {
 			err = t.ErrTransfer
 		}

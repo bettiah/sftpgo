@@ -1820,7 +1820,7 @@ func (c *BaseConnection) GetGenericError(err error) error {
 		if isSFTPGoError(err) {
 			return fmt.Errorf("%w: %w", sftp.ErrSSHFxFailure, err)
 		}
-		if err != nil {
+		if err != nil && !errors.Is(err, vfs.ErrStagingWrite) {
 			var pathError *fs.PathError
 			if errors.As(err, &pathError) {
 				c.Log(logger.LevelError, "generic path error: %+v", pathError)

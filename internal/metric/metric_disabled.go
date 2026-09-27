@@ -86,3 +86,12 @@ func HTTPRequestServed(_ int) {}
 
 // UpdateActiveConnectionsSize sets the metric for active connections
 func UpdateActiveConnectionsSize(_ int) {}
+
+// AddStagingWriteError is disabled without metrics.
+func AddStagingWriteError() {}
+
+// AddSSHPreauthConnection is disabled without metrics.
+func AddSSHPreauthConnection(_ int) {}
+
+// AddCapacityRefusal is disabled without metrics.
+func AddCapacityRefusal(_ string) {}

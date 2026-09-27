@@ -1,0 +1,292 @@
+// Copyright (C) 2026 EDI Platform contributors
+// SPDX-License-Identifier: AGPL-3.0-only
+package vfs
+
+import (
+	"bytes"
+	"errors"
+	"github.com/drakkan/sftpgo/v2/internal/logger"
+	"github.com/rs/zerolog"
+	"io"
+	"strings"
+	"sync"
+	"testing"
+
+	"github.com/eikenb/pipeat"
+	"github.com/prometheus/client_golang/prometheus"
+)
+
+type stagingFaultWriter struct {
+	pipeWriterAt
+	fail    bool
+	failure error
+}
+
+func (w *stagingFaultWriter) WriteAt(p []byte, off int64) (int, error) {
+	if w.fail {
+		if w.failure != nil {
+			return 0, w.failure
+		}
+		return 0, io.EOF
+	}
+	return w.pipeWriterAt.WriteAt(p, off)
+}
+func (w *stagingFaultWriter) Write(p []byte) (int, error) {
+	if w.fail {
+		if w.failure != nil {
+			return 0, w.failure
+		}
+		return 0, io.EOF
+	}
+	return w.pipeWriterAt.Write(p)
+}
+func stagingCounter(t *testing.T) float64 {
+	t.Helper()
+	families, err := prometheus.DefaultGatherer.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range families {
+		if f.GetName() == "sftpgo_staging_write_errors_total" {
+			if len(f.Metric) != 1 || len(f.Metric[0].Label) != 0 {
+				t.Fatal("staging metric must be unlabelled")
+			}
+			return f.Metric[0].GetCounter().GetValue()
+		}
+	}
+	t.Fatal("missing staging counter")
+	return 0
+}
+func stagingFaultPipe(t *testing.T) (pipeReaderAt, pipeWriterAt, *stagingFaultWriter) {
+	t.Helper()
+	original := stagingPipeInDir
+	var fault *stagingFaultWriter
+	stagingPipeInDir = func(dir string) (pipeReaderAt, pipeWriterAt, error) {
+		r, w, err := pipeat.PipeInDir(dir)
+		fault = &stagingFaultWriter{pipeWriterAt: w}
+		return r, fault, err
+	}
+	t.Cleanup(func() { stagingPipeInDir = original })
+	r, w, err := createPipeFn(t.TempDir(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { r.Close(); w.Close() })
+	return r, w, fault
+}
+
+func TestEDIStagingHoleAndStickyFailure(t *testing.T) {
+	for _, sequential := range []bool{false, true} {
+		t.Run(map[bool]string{false: "ReadAt", true: "Read"}[sequential], func(t *testing.T) {
+			r, w, fault := stagingFaultPipe(t)
+			before := stagingCounter(t)
+			if _, err := w.WriteAt([]byte("later part"), 10); err != nil {
+				t.Fatal(err)
+			}
+			fault.fail = true
+			for i := 0; i < 3; i++ {
+				if _, err := w.WriteAt(make([]byte, 10), 0); !errors.Is(err, ErrStagingWrite) {
+					t.Errorf("write error = %v", err)
+				}
+			}
+			// Even if a subsequent retry repairs the hole, this pipe stays failed.
+			fault.fail = false
+			if _, err := w.WriteAt(make([]byte, 10), 0); err != nil {
+				t.Fatal(err)
+			}
+			go w.Close()
+			var n int
+			var err error
+			if sequential {
+				n, err = r.Read(make([]byte, 20))
+			} else {
+				n, err = r.ReadAt(make([]byte, 20), 0)
+			}
+			if n != 0 || !errors.Is(err, ErrStagingWrite) {
+				t.Fatalf("corrupt download exposed: n=%d err=%v", n, err)
+			}
+			if delta := stagingCounter(t) - before; delta != 1 {
+				t.Fatalf("counter delta=%v, want 1", delta)
+			}
+		})
+	}
+}
+
+func TestEDIStagingHoleAfterBlockedRead(t *testing.T) {
+	for _, sequential := range []bool{false, true} {
+		t.Run(map[bool]string{false: "ReadAt", true: "Read"}[sequential], func(t *testing.T) {
+			innerR, innerW, err := pipeat.PipeInDir(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			entered := make(chan struct{})
+			state := &stagingPipeState{}
+			r := &stagingReader{pipeReaderAt: &stagingReadBarrier{pipeReaderAt: innerR, entered: entered}, state: state}
+			w := &stagingWriter{pipeWriterAt: &stagingFaultWriter{pipeWriterAt: innerW, fail: true}, state: state}
+			defer r.Close()
+			done := make(chan error, 1)
+			go func() {
+				var n int
+				var err error
+				if sequential {
+					n, err = r.Read(make([]byte, 10))
+				} else {
+					n, err = r.ReadAt(make([]byte, 10), 0)
+				}
+				if n != 0 || !errors.Is(err, ErrStagingWrite) {
+					done <- errors.New("blocked read exposed data/EOF")
+				} else {
+					done <- nil
+				}
+			}()
+			<-entered
+			innerW.WriteAt([]byte("later part"), 10)
+			_, err = w.WriteAt(make([]byte, 10), 0)
+			go w.CloseWithError(err)
+			if err := <-done; err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+type stagingReadBarrier struct {
+	pipeReaderAt
+	entered chan struct{}
+	once    sync.Once
+}
+
+func (r *stagingReadBarrier) ReadAt(p []byte, off int64) (int, error) {
+	r.once.Do(func() { close(r.entered) })
+	return r.pipeReaderAt.ReadAt(p, off)
+}
+func (r *stagingReadBarrier) Read(p []byte) (int, error) {
+	r.once.Do(func() { close(r.entered) })
+	return r.pipeReaderAt.Read(p)
+}
+
+func TestEDIStagingClosureAndSuccessControls(t *testing.T) {
+	for _, closeSide := range []string{"reader", "writer", "reader-error", "writer-error", "success"} {
+		t.Run(closeSide, func(t *testing.T) {
+			r, w, err := createPipeFn(t.TempDir(), 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { r.Close(); w.Close() }()
+			before := stagingCounter(t)
+			want := io.EOF
+			switch closeSide {
+			case "reader":
+				r.Close()
+			case "writer":
+				go w.Close()
+				r.ReadAt(make([]byte, 1), 0)
+			case "reader-error":
+				want = errors.New("cancelled")
+				r.CloseWithError(want)
+			case "writer-error":
+				want = errors.New("cancelled")
+				go w.CloseWithError(want)
+				r.ReadAt(make([]byte, 1), 0)
+			case "success":
+				want = nil
+			}
+			_, err = w.WriteAt([]byte("ok"), 0)
+			if !errors.Is(err, want) {
+				t.Fatalf("write error=%v want %v", err, want)
+			}
+			if closeSide == "success" {
+				go w.Close()
+				b, err := io.ReadAll(r)
+				if err != nil || string(b) != "ok" {
+					t.Fatalf("%q %v", b, err)
+				}
+			}
+			if stagingCounter(t) != before {
+				t.Fatal("normal close/success counted as staging failure")
+			}
+		})
+	}
+}
+
+func TestEDIStagingConcurrentFailureLogsOnce(t *testing.T) {
+	r, w, fault := stagingFaultPipe(t)
+	fault.fail = true
+	var logs bytes.Buffer
+	old := *logger.GetLogger()
+	*logger.GetLogger() = zerolog.New(&logs).Level(zerolog.ErrorLevel)
+	defer func() { *logger.GetLogger() = old }()
+	before := stagingCounter(t)
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := w.WriteAt([]byte("x"), 0); !errors.Is(err, ErrStagingWrite) {
+				t.Error(err)
+			}
+		}()
+	}
+	wg.Wait()
+	r.Close()
+	if delta := stagingCounter(t) - before; delta != 1 {
+		t.Fatalf("counter delta=%v", delta)
+	}
+	if n := strings.Count(logs.String(), `"level":"error"`); n != 1 {
+		t.Fatalf("Error logs=%d: %s", n, logs.String())
+	}
+}
+
+func TestEDIStagingSequentialWriteFailure(t *testing.T) {
+	r, w, fault := stagingFaultPipe(t)
+	fault.fail = true
+	fault.failure = errors.New("injected disk write error")
+	before := stagingCounter(t)
+	if _, err := w.Write([]byte("bytes")); !errors.Is(err, ErrStagingWrite) {
+		t.Fatalf("sequential staging write=%v", err)
+	}
+	if n, err := r.Read(make([]byte, 5)); n != 0 || !errors.Is(err, ErrStagingWrite) {
+		t.Fatalf("read after sequential failure: %d %v", n, err)
+	}
+	if delta := stagingCounter(t) - before; delta != 1 {
+		t.Fatalf("counter delta=%v", delta)
+	}
+}
+
+// Reader.Close may block on pipeat's file lock while a writer is in flight.
+// The closure flag must be published before entering that inner close.
+func TestEDIStagingReaderCloseOrder(t *testing.T) {
+	original := stagingPipeInDir
+	entered, unblock := make(chan struct{}), make(chan struct{})
+	stagingPipeInDir = func(dir string) (pipeReaderAt, pipeWriterAt, error) {
+		r, w, err := pipeat.PipeInDir(dir)
+		return &stagingClosingReader{pipeReaderAt: r, entered: entered, unblock: unblock}, &stagingFaultWriter{pipeWriterAt: w, fail: true}, err
+	}
+	defer func() { stagingPipeInDir = original }()
+	r, w, err := createPipeFn(t.TempDir(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() { defer close(done); r.Close() }()
+	defer func() { close(unblock); <-done; w.Close() }()
+	<-entered
+	before := stagingCounter(t)
+	if _, err := w.WriteAt([]byte("x"), 0); err != io.EOF {
+		t.Fatalf("reader cancellation classified as staging failure: %v", err)
+	}
+	if stagingCounter(t) != before {
+		t.Fatal("reader cancellation incremented staging counter")
+	}
+}
+
+type stagingClosingReader struct {
+	pipeReaderAt
+	entered, unblock chan struct{}
+}
+
+func (r *stagingClosingReader) CloseWithError(err error) error {
+	close(r.entered)
+	<-r.unblock
+	return r.pipeReaderAt.CloseWithError(err)
+}

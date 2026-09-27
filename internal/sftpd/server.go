@@ -128,6 +128,9 @@ func (b *Binding) HasProxy() bool {
 type Configuration struct {
 	// Addresses and ports to bind to
 	Bindings []Binding `json:"bindings" mapstructure:"bindings"`
+	// HandshakeTimeout bounds SSH version exchange, KEX and authentication in seconds.
+	// Zero uses 120 seconds; positive values must be at least 10.
+	HandshakeTimeout int `json:"handshake_timeout" mapstructure:"handshake_timeout"`
 	// Maximum number of authentication attempts permitted per connection.
 	// If set to a negative number, the number of attempts is unlimited.
 	// If set to zero, the number of attempts are limited to 6.
@@ -367,10 +370,27 @@ func (c *Configuration) Initialize(configDir string) error {
 	return <-exitChannel
 }
 
+func (c *Configuration) getHandshakeTimeout() time.Duration {
+	if c.HandshakeTimeout == 0 {
+		return defaultHandshakeTimeout
+	}
+	return time.Duration(c.HandshakeTimeout) * time.Second
+}
+
+func (c *Configuration) validateHandshakeTimeout() error {
+	if c.HandshakeTimeout < 0 || (c.HandshakeTimeout > 0 && c.HandshakeTimeout < 10) {
+		return errors.New("sftpd.handshake_timeout must be 0 or at least 10 seconds")
+	}
+	return nil
+}
+
 func (c *Configuration) startServing(configDir string) (chan error, error) {
 	serviceStatusMu.Lock()
 	defer serviceStatusMu.Unlock()
 
+	if err := c.validateHandshakeTimeout(); err != nil {
+		return nil, err
+	}
 	c.executor = defaultExecutor{}
 	if err := c.loadFromProvider(); err != nil {
 		return nil, fmt.Errorf("unable to load configs from provider: %w", err)
@@ -637,11 +657,16 @@ func (c *Configuration) AcceptInboundConnection(conn net.Conn, config *ssh.Serve
 		conn.Close()
 		return
 	}
+	metric.AddSSHPreauthConnection(1)
+	var preauthDone sync.Once
+	finishPreauth := func() { preauthDone.Do(func() { metric.AddSSHPreauthConnection(-1) }) }
+	defer finishPreauth()
 	// Before beginning a handshake must be performed on the incoming net.Conn
 	// we'll set a Deadline for handshake to complete, the default is 2 minutes as OpenSSH
-	_ = conn.SetDeadline(time.Now().Add(handshakeTimeout))
+	_ = conn.SetDeadline(time.Now().Add(c.getHandshakeTimeout()))
 
 	sconn, chans, reqs, err := ssh.NewServerConn(conn, config)
+	finishPreauth()
 	if err != nil {
 		logger.Debug(logSender, "", "failed to accept an incoming connection from ip %q: %v", ipAddr, err)
 		checkAuthError(ipAddr, err)
@@ -809,6 +834,7 @@ func checkAuthError(ip string, err error) {
 	var authErrors *ssh.ServerAuthError
 	if errors.As(err, &authErrors) {
 		// check public key auth errors here
+		var unavailable *authenticationError
 		for _, err := range authErrors.Errors {
 			var sftpAuthErr *authenticationError
 			if errors.As(err, &sftpAuthErr) {
@@ -819,11 +845,20 @@ func checkAuthError(ip string, err error) {
 						event = common.HostEventUserNotFound
 						logEv = notifier.LogEventTypeLoginNoUser
 					}
+					if errors.Is(err, dataprovider.ErrExternalAuthUnavailable) {
+						if unavailable == nil {
+							unavailable = sftpAuthErr
+						}
+						continue
+					}
 					common.AddDefenderEvent(ip, common.ProtocolSSH, event)
 					plugin.Handler.NotifyLogEvent(logEv, common.ProtocolSSH, sftpAuthErr.getUsername(), ip, "", err)
 					return
 				}
 			}
+		}
+		if unavailable != nil {
+			plugin.Handler.NotifyLogEvent(notifier.LogEventTypeLoginFailed, common.ProtocolSSH, unavailable.getUsername(), ip, "", unavailable)
 		}
 	} else {
 		logger.ConnectionFailedLog("", ip, dataprovider.LoginMethodNoAuthTried, common.ProtocolSSH, err.Error())
@@ -1340,7 +1375,9 @@ func updateLoginMetrics(user *dataprovider.User, ip, method string, err error) {
 				event = common.HostEventUserNotFound
 				logEv = notifier.LogEventTypeLoginNoUser
 			}
-			common.AddDefenderEvent(ip, common.ProtocolSSH, event)
+			if !errors.Is(err, dataprovider.ErrExternalAuthUnavailable) {
+				common.AddDefenderEvent(ip, common.ProtocolSSH, event)
+			}
 			plugin.Handler.NotifyLogEvent(logEv, common.ProtocolSSH, user.Username, ip, "", err)
 			if method != dataprovider.SSHLoginMethodPublicKey {
 				common.DelayLogin(err)

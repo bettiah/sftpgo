@@ -31,7 +31,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/eikenb/pipeat"
 	"github.com/pkg/sftp"
 	"github.com/sftpgo/sdk"
 	passwordvalidator "github.com/wagslane/go-password-validator"
@@ -78,7 +77,12 @@ var (
 
 var (
 	createPipeFn = func(dirPath string, _ int64) (pipeReaderAt, pipeWriterAt, error) {
-		return pipeat.PipeInDir(dirPath)
+		r, w, err := stagingPipeInDir(dirPath)
+		if err != nil {
+			return nil, nil, err
+		}
+		state := &stagingPipeState{}
+		return &stagingReader{pipeReaderAt: r, state: state}, &stagingWriter{pipeWriterAt: w, state: state}, nil
 	}
 )
 

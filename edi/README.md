@@ -35,10 +35,57 @@ the resulting digest after pulling and functionally qualifying that exact image.
 An image publication is not a deployment. No additional architectures are qualified.
 
 Retire the extent patch when an upstream release passes the same sparse-write,
-transfer-cancellation and accounting guards. This patch does not provide aggregate
+transfer-cancellation and accounting guards. The extent patch alone does not provide aggregate
 capacity enforcement or writer settlement. One attempt may commit while returning an
 error; a lost initiation response can leave one unknown-ID MPU. Transient upload errors
 previously hidden by retries become visible to clients. Use a correctly region-addressed
 endpoint without redirects: the SDK attempt limit does not replace HTTP redirect handling
 or lower transport recovery before a request is sent. It is not a universal HTTP-send bound.
 Local SDK/native qualification does not replace exact Linux-artifact and real-AWS qualification.
+
+Disk-backed staging write failures fail the whole download, including a transient
+failure followed by a successful retry: the failure flag stays set. The pipe wrapper
+rejects reads across holes and converts pipeat's ambiguous write EOF to a staging error;
+uploads and downloads return `SSH_FX_FAILURE`. It logs once at Error per failed pipe
+(the structured transfer record remains at Warn) and increments the unlabelled
+`sftpgo_staging_write_errors_total` once. Pipeat discards the errno, so this counts
+staging write failures, not specifically ENOSPC. Normal reader/writer closure is excluded.
+
+SSH external-auth transport errors, timeouts, non-200 responses, program failures,
+invalid JSON and user save/validation failures after acceptance no longer score against
+the client IP. This is unconditional and SSH-only; `200 {}` still rejects and scores.
+Client-forcible 400s from over-length fields and hook saturation during a flood now
+produce unscored hook load; the per-source rate limiter remains the brake. Backend
+faults disguised as `200 {}` (including custody-release faults) still score. Post-KEX
+abandonment remains unscored; a hook hang crossing the handshake deadline can still
+score `NoLoginTried`. Both residual scoring cases are inert at `score_no_auth: 0`;
+N1c is deferred to the release that considers raising it. Password `max_sessions`
+refusals still score while public-key refusals do not, as before.
+
+`sftpd.handshake_timeout` is the SSH login grace period in seconds (default 120;
+0 uses 120; negatives and 1–9 fail startup). It covers version exchange, KEX and
+authentication, including hook latency, after the PROXY header's separate 10-second
+bound. A running hook still waits for its own timeout even if the network deadline
+expires; keep hook timeouts shorter than this grace period. Authentication clears the
+deadline; `idle_timeout` then governs. Override with
+`SFTPGO_SFTPD__HANDSHAKE_TIMEOUT`.
+
+`common.max_total_transfers` defaults to 0 (off; negative values also disable it),
+overridden by `SFTPGO_COMMON__MAX_TOTAL_TRANSFERS`. SFTP OPEN atomically reserves a slot
+against active uploads/downloads plus pending opens until the active transfer is added
+or OPEN fails; CLOSE frees the active slot. Other protocols' active transfers count,
+but only SFTP reserves, so the hard bound assumes other transfer protocols/SSH commands
+are disabled. Existing connection/per-user caps still apply. New-cap refusal returns
+`SSH_FX_FAILURE` on OPEN without a defender event; the session remains usable. This key
+does not participate in connection admission. A per-pod download staging disk bound
+based on 5 GiB per slot assumes hosted outbound objects are at most 5 GiB; uploads'
+extent cap alone does not establish that precondition.
+
+`sftpgo_ssh_preauth_connections` counts accepted SSH connections after admission and
+before authentication completes, excluding the PROXY header wait, and is released on
+success, failure, deadline, close or panic. `sftpgo_capacity_refusals_total{limit}`
+counts capacity refusals only, with `limit` equal to `max_total_connections`,
+`max_per_host_connections` or `max_total_transfers`; safelisted overruns are excluded.
+There are no IP, username, path or stage labels. The existing shared connection limit
+also applies to HTTP admin requests, so `limit="max_total_connections"` includes their
+refusals. An SSH pre-auth flood can still impede admin REST under that shared limit.

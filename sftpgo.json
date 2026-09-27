@@ -20,6 +20,7 @@
     "post_connect_hook": "",
     "post_disconnect_hook": "",
     "max_total_connections": 0,
+    "max_total_transfers": 0,
     "max_per_host_connections": 20,
     "allowlist_status": 0,
     "allow_self_connections": 0,
@@ -93,6 +94,7 @@
       }
     ],
     "max_auth_tries": 0,
+    "handshake_timeout": 120,
     "host_keys": [],
     "host_certificates": [],
     "host_key_algorithms": [],
