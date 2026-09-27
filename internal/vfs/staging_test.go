@@ -197,8 +197,11 @@ func TestEDIStagingClosureAndSuccessControls(t *testing.T) {
 			}
 			if closeSide == "success" {
 				go w.Close()
+				if n, err := r.Read(make([]byte, 1)); n != 1 || err != nil {
+					t.Fatalf("initial sequential read: n=%d err=%v", n, err)
+				}
 				b, err := io.ReadAll(r)
-				if err != nil || string(b) != "ok" {
+				if err != nil || string(b) != "k" {
 					t.Fatalf("%q %v", b, err)
 				}
 			}
@@ -289,4 +292,120 @@ func (r *stagingClosingReader) CloseWithError(err error) error {
 	close(r.entered)
 	<-r.unblock
 	return r.pipeReaderAt.CloseWithError(err)
+}
+
+// Model pipeat masking a disk read error with the clean writer's io.EOF.
+type stagingShortReader struct {
+	pipeReaderAt
+	fail bool
+}
+
+func (r *stagingShortReader) ReadAt(p []byte, off int64) (int, error) {
+	if r.fail {
+		return 0, io.EOF
+	}
+	return r.pipeReaderAt.ReadAt(p, off)
+}
+func (r *stagingShortReader) Read(p []byte) (int, error) {
+	if r.fail {
+		return 1, io.EOF // A partial read must discard its bytes too.
+	}
+	return r.pipeReaderAt.Read(p)
+}
+
+func TestEDIStagingPrematureEOF(t *testing.T) {
+	for _, sequential := range []bool{false, true} {
+		t.Run(map[bool]string{false: "ReadAt", true: "Read"}[sequential], func(t *testing.T) {
+			original := stagingPipeInDir
+			var fault *stagingShortReader
+			stagingPipeInDir = func(dir string) (pipeReaderAt, pipeWriterAt, error) {
+				r, w, err := pipeat.AsyncWriterPipeInDir(dir)
+				fault = &stagingShortReader{pipeReaderAt: r}
+				return fault, w, err
+			}
+			t.Cleanup(func() { stagingPipeInDir = original })
+			r, w, err := createPipeFn(t.TempDir(), 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer r.Close()
+			before := stagingCounter(t)
+			if sequential {
+				if _, err := w.Write([]byte("abcd")); err != nil {
+					t.Fatal(err)
+				}
+				_, err = w.Write([]byte("efgh"))
+			} else {
+				// The last write is below the high-water mark, as in multipart S3.
+				if _, err := w.WriteAt([]byte("efgh"), 4); err != nil {
+					t.Fatal(err)
+				}
+				_, err = w.WriteAt([]byte("abcd"), 0)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := w.Close(); err != nil {
+				t.Fatal(err)
+			}
+			// Legitimate EOF at or beyond the extent must not poison the pipe.
+			for _, off := range []int64{0, 8, 12} {
+				n, err := r.ReadAt(make([]byte, 16), off)
+				want := 0
+				if off == 0 {
+					want = 8
+				}
+				if n != want || err != io.EOF {
+					t.Fatalf("normal EOF at %d: n=%d err=%v", off, n, err)
+				}
+			}
+			if sequential {
+				if n, err := r.Read(make([]byte, 4)); n != 4 || err != nil {
+					t.Fatalf("initial read: n=%d err=%v", n, err)
+				}
+			}
+			if stagingCounter(t) != before {
+				t.Fatal("normal EOF classified as a staging failure")
+			}
+			fault.fail = true
+			var n int
+			if sequential {
+				n, err = r.Read(make([]byte, 8))
+			} else {
+				n, err = r.ReadAt(make([]byte, 8), 6)
+			}
+			if n != 0 || !errors.Is(err, ErrStagingWrite) {
+				t.Fatalf("premature EOF exposed: n=%d err=%v", n, err)
+			}
+			fault.fail = false
+			if n, err := r.ReadAt(make([]byte, 1), 0); n != 0 || !errors.Is(err, ErrStagingWrite) {
+				t.Fatalf("read failure was not sticky: n=%d err=%v", n, err)
+			}
+			if delta := stagingCounter(t) - before; delta != 1 {
+				t.Fatalf("read failure counter delta=%v, want 1", delta)
+			}
+		})
+	}
+}
+
+func TestEDIStagingReadCancellation(t *testing.T) {
+	innerR, innerW, err := pipeat.AsyncWriterPipeInDir(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := &stagingPipeState{}
+	r := &stagingReader{pipeReaderAt: innerR, state: state}
+	w := &stagingWriter{pipeWriterAt: innerW, state: state}
+	if _, err := w.WriteAt([]byte("unread"), 0); err != nil {
+		t.Fatal(err)
+	}
+	w.Close()
+	r.Close()
+	before := stagingCounter(t)
+	if n, err := r.ReadAt(make([]byte, 1), 0); n != 0 || err != io.EOF {
+		t.Fatalf("reader cancellation classified as staging failure: n=%d err=%v", n, err)
+	}
+	if stagingCounter(t) != before {
+		t.Fatal("reader cancellation incremented staging counter")
+	}
 }

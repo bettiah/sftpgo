@@ -62,6 +62,8 @@ const (
 )
 
 var (
+	errSessionLimit = errors.New("maximum sessions reached")
+
 	supportedAlgos        = ssh.SupportedAlgorithms()
 	insecureAlgos         = ssh.InsecureAlgorithms()
 	sftpExtensions        = []string{"statvfs@openssh.com"}
@@ -839,17 +841,17 @@ func checkAuthError(ip string, err error) {
 			var sftpAuthErr *authenticationError
 			if errors.As(err, &sftpAuthErr) {
 				if sftpAuthErr.getLoginMethod() == dataprovider.SSHLoginMethodPublicKey {
-					event := common.HostEventLoginFailed
-					logEv := notifier.LogEventTypeLoginFailed
-					if errors.Is(err, util.ErrNotFound) {
-						event = common.HostEventUserNotFound
-						logEv = notifier.LogEventTypeLoginNoUser
-					}
 					if errors.Is(err, dataprovider.ErrExternalAuthUnavailable) {
 						if unavailable == nil {
 							unavailable = sftpAuthErr
 						}
 						continue
+					}
+					event := common.HostEventLoginFailed
+					logEv := notifier.LogEventTypeLoginFailed
+					if errors.Is(err, util.ErrNotFound) {
+						event = common.HostEventUserNotFound
+						logEv = notifier.LogEventTypeLoginNoUser
 					}
 					common.AddDefenderEvent(ip, common.ProtocolSSH, event)
 					plugin.Handler.NotifyLogEvent(logEv, common.ProtocolSSH, sftpAuthErr.getUsername(), ip, "", err)
@@ -858,6 +860,7 @@ func checkAuthError(ip string, err error) {
 			}
 		}
 		if unavailable != nil {
+			// An unavailable hook supplied no user verdict; notify a generic login failure.
 			plugin.Handler.NotifyLogEvent(notifier.LogEventTypeLoginFailed, common.ProtocolSSH, unavailable.getUsername(), ip, "", unavailable)
 		}
 	} else {
@@ -893,7 +896,7 @@ func loginUser(user *dataprovider.User, loginMethod, publicKey string, conn ssh.
 		if activeSessions >= user.MaxSessions {
 			logger.Info(logSender, "", "authentication refused for user: %q, too many open sessions: %v/%v", user.Username,
 				activeSessions, user.MaxSessions)
-			return nil, fmt.Errorf("too many open sessions: %v", activeSessions)
+			return nil, fmt.Errorf("too many open sessions: %v: %w", activeSessions, errSessionLimit)
 		}
 	}
 	if !user.IsLoginMethodAllowed(loginMethod, common.ProtocolSSH) {
@@ -1358,6 +1361,10 @@ func (c *Configuration) validateKeyboardInteractiveCredentials(conn ssh.ConnMeta
 	return sshPerm, nil
 }
 
+func isUnscoredLoginError(err error) bool {
+	return errors.Is(err, dataprovider.ErrExternalAuthUnavailable) || errors.Is(err, errSessionLimit)
+}
+
 func updateLoginMetrics(user *dataprovider.User, ip, method string, err error) {
 	metric.AddLoginAttempt(method)
 	if err == nil {
@@ -1375,7 +1382,7 @@ func updateLoginMetrics(user *dataprovider.User, ip, method string, err error) {
 				event = common.HostEventUserNotFound
 				logEv = notifier.LogEventTypeLoginNoUser
 			}
-			if !errors.Is(err, dataprovider.ErrExternalAuthUnavailable) {
+			if !isUnscoredLoginError(err) {
 				common.AddDefenderEvent(ip, common.ProtocolSSH, event)
 			}
 			plugin.Handler.NotifyLogEvent(logEv, common.ProtocolSSH, user.Username, ip, "", err)

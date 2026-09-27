@@ -1,3 +1,5 @@
+//go:build edi
+
 package config_test
 
 import (

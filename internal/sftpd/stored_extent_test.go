@@ -1,3 +1,5 @@
+//go:build edi
+
 // Copyright (C) 2026 EDI Platform contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 package sftpd

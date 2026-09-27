@@ -4,6 +4,7 @@ package vfs
 
 import (
 	"errors"
+	"io"
 	"sync/atomic"
 
 	"github.com/drakkan/sftpgo/v2/internal/logger"
@@ -11,8 +12,8 @@ import (
 	"github.com/eikenb/pipeat"
 )
 
-// ErrStagingWrite means the staging file could not accept a write. pipeat loses
-// the underlying errno, so this must not be classified specifically as ENOSPC.
+// ErrStagingWrite means a staging write failed or a read ended before the written
+// extent. pipeat loses the underlying errno, so this is not specifically ENOSPC.
 var ErrStagingWrite = errors.New("temporary staging write failed")
 
 var stagingPipeInDir = func(dir string) (pipeReaderAt, pipeWriterAt, error) {
@@ -23,11 +24,20 @@ type stagingPipeState struct {
 	readerClosed atomic.Bool
 	writerClosed atomic.Bool
 	failed       atomic.Bool
+	writtenEnd   atomic.Int64
+}
+
+func (s *stagingPipeState) fail() {
+	if s.failed.CompareAndSwap(false, true) {
+		metric.AddStagingWriteError()
+		logger.Error("staging", "", "%v", ErrStagingWrite)
+	}
 }
 
 type stagingReader struct {
 	pipeReaderAt
-	state *stagingPipeState
+	state      *stagingPipeState
+	readOffset int64 // Sequential Read cursor; ReadAt does not advance it.
 }
 
 func (r *stagingReader) ReadAt(p []byte, off int64) (int, error) {
@@ -35,6 +45,15 @@ func (r *stagingReader) ReadAt(p []byte, off int64) (int, error) {
 		return 0, ErrStagingWrite
 	}
 	n, err := r.pipeReaderAt.ReadAt(p, off)
+	return r.readResult(n, err, off)
+}
+
+func (r *stagingReader) readResult(n int, err error, off int64) (int, error) {
+	// After a clean writer close pipeat masks file read errors as EOF. Bytes
+	// already written must remain readable; cancellation is not a disk failure.
+	if err == io.EOF && !r.state.readerClosed.Load() && off+int64(n) < r.state.writtenEnd.Load() {
+		r.state.fail()
+	}
 	// Closing the writer can unblock a read over holes. Discard those bytes even
 	// when the underlying read reports success, or a retry subsequently succeeded.
 	if r.state.failed.Load() {
@@ -48,10 +67,9 @@ func (r *stagingReader) Read(p []byte) (int, error) {
 		return 0, ErrStagingWrite
 	}
 	n, err := r.pipeReaderAt.Read(p)
-	if r.state.failed.Load() {
-		return 0, ErrStagingWrite
-	}
-	return n, err
+	off := r.readOffset
+	r.readOffset += int64(n)
+	return r.readResult(n, err, off)
 }
 
 func (r *stagingReader) Close() error { return r.CloseWithError(nil) }
@@ -62,25 +80,35 @@ func (r *stagingReader) CloseWithError(err error) error {
 
 type stagingWriter struct {
 	pipeWriterAt
-	state *stagingPipeState
+	state       *stagingPipeState
+	writeOffset int64 // Sequential Write cursor; WriteAt does not advance it.
 }
 
-func (w *stagingWriter) writeResult(n int, err error) (int, error) {
+func (w *stagingWriter) writeResult(n int, err error, off int64) (int, error) {
+	if n > 0 {
+		end := off + int64(n)
+		for old := w.state.writtenEnd.Load(); end > old; old = w.state.writtenEnd.Load() {
+			if w.state.writtenEnd.CompareAndSwap(old, end) {
+				break
+			}
+		}
+	}
 	// WriteAt hides file errors as EOF; sequential Write retains the file error.
 	if err != nil && !w.state.readerClosed.Load() && !w.state.writerClosed.Load() {
-		if w.state.failed.CompareAndSwap(false, true) {
-			metric.AddStagingWriteError()
-			logger.Error("staging", "", "%v", ErrStagingWrite)
-		}
+		w.state.fail()
 		return 0, ErrStagingWrite
 	}
 	return n, err
 }
 func (w *stagingWriter) WriteAt(p []byte, off int64) (int, error) {
-	return w.writeResult(w.pipeWriterAt.WriteAt(p, off))
+	n, err := w.pipeWriterAt.WriteAt(p, off)
+	return w.writeResult(n, err, off)
 }
 func (w *stagingWriter) Write(p []byte) (int, error) {
-	return w.writeResult(w.pipeWriterAt.Write(p))
+	n, err := w.pipeWriterAt.Write(p)
+	off := w.writeOffset
+	w.writeOffset += int64(n)
+	return w.writeResult(n, err, off)
 }
 func (w *stagingWriter) Close() error { return w.CloseWithError(nil) }
 func (w *stagingWriter) CloseWithError(err error) error {

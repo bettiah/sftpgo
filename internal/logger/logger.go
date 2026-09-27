@@ -199,18 +199,13 @@ func ErrorToConsole(format string, v ...any) {
 	consoleLogger.Error().Msg(fmt.Sprintf(format, v...))
 }
 
-// TransferLog logs uploads or downloads. If the error was already logged, the
-// structured transfer record is retained at Warn to avoid a duplicate Error log.
+// TransferLog logs uploads or downloads
 func TransferLog(operation, path, virtualPath string, elapsed int64, size int64, user, connectionID, protocol, localAddr,
-	remoteAddr, ftpMode string, err error, errorAlreadyLogged ...bool,
+	remoteAddr, ftpMode string, err error,
 ) {
 	var ev *zerolog.Event
 	if err != nil {
-		if len(errorAlreadyLogged) > 0 && errorAlreadyLogged[0] {
-			ev = logger.Warn()
-		} else {
-			ev = logger.Error()
-		}
+		ev = logger.Error()
 	} else {
 		ev = logger.Info()
 	}

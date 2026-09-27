@@ -45,11 +45,14 @@ Local SDK/native qualification does not replace exact Linux-artifact and real-AW
 
 Disk-backed staging write failures fail the whole download, including a transient
 failure followed by a successful retry: the failure flag stays set. The pipe wrapper
-rejects reads across holes and converts pipeat's ambiguous write EOF to a staging error;
-uploads and downloads return `SSH_FX_FAILURE`. It logs once at Error per failed pipe
-(the structured transfer record remains at Warn) and increments the unlabelled
-`sftpgo_staging_write_errors_total` once. Pipeat discards the errno, so this counts
-staging write failures, not specifically ENOSPC. Normal reader/writer closure is excluded.
+prevents holes, truncation and zero-length "successful" downloads by converting
+pipeat's ambiguous write EOF to a staging error and rejecting subsequent reads.
+Uploads and downloads return `SSH_FX_FAILURE`. The wrapper logs once at Error per
+failed pipe and increments the unlabelled `sftpgo_staging_write_errors_total` once.
+Pipeat discards the errno, so this counts staging failures, not specifically ENOSPC.
+Normal reader/writer closure is excluded.
+An EOF short of the highest written offset also fails the pipe and increments the same
+counter, detecting staging read errors hidden by pipeat after a clean download close.
 
 SSH external-auth transport errors, timeouts, non-200 responses, program failures,
 invalid JSON and user save/validation failures after acceptance no longer score against
@@ -59,8 +62,9 @@ produce unscored hook load; the per-source rate limiter remains the brake. Backe
 faults disguised as `200 {}` (including custody-release faults) still score. Post-KEX
 abandonment remains unscored; a hook hang crossing the handshake deadline can still
 score `NoLoginTried`. Both residual scoring cases are inert at `score_no_auth: 0`;
-N1c is deferred to the release that considers raising it. Password `max_sessions`
-refusals still score while public-key refusals do not, as before.
+N1c is deferred to the release that considers raising it. SSH `max_sessions` refusals
+after successful credential checks do not score for password, keyboard-interactive
+or public-key auth.
 
 `sftpd.handshake_timeout` is the SSH login grace period in seconds (default 120;
 0 uses 120; negatives and 1–9 fail startup). It covers version exchange, KEX and
@@ -74,9 +78,11 @@ deadline; `idle_timeout` then governs. Override with
 overridden by `SFTPGO_COMMON__MAX_TOTAL_TRANSFERS`. SFTP OPEN atomically reserves a slot
 against active uploads/downloads plus pending opens until the active transfer is added
 or OPEN fails; CLOSE frees the active slot. Other protocols' active transfers count,
-but only SFTP reserves, so the hard bound assumes other transfer protocols/SSH commands
-are disabled. Existing connection/per-user caps still apply. New-cap refusal returns
-`SSH_FX_FAILURE` on OPEN without a defender event; the session remains usable. This key
+but SCP, SSH commands, FTP, WebDAV and httpd transfers are never refused by
+`max_total_transfers`. The hard bound requires `sftpd.enabled_ssh_commands: []`,
+FTP/WebDAV ports 0 and httpd user file endpoints disabled. Existing connection/per-user
+caps still apply. New-cap refusal returns `SSH_FX_FAILURE` on OPEN without a defender
+event; the session remains usable. This key
 does not participate in connection admission. A per-pod download staging disk bound
 based on 5 GiB per slot assumes hosted outbound objects are at most 5 GiB; uploads'
 extent cap alone does not establish that precondition.

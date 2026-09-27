@@ -1,3 +1,5 @@
+//go:build edi
+
 package sftpd
 
 import (
@@ -491,5 +493,74 @@ func TestEDIPreauthGaugeExits(t *testing.T) {
 				t.Fatal("preauth gauge leaked")
 			}
 		})
+	}
+}
+
+func TestEDISessionLimitScoring(t *testing.T) {
+	for _, method := range []string{"password", "keyboard-interactive", "publickey"} {
+		for _, atLimit := range []bool{false, true} {
+			for _, valid := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/limit=%v/valid=%v", method, atLimit, valid), func(t *testing.T) {
+					ediAuthSetup(t, "")
+					key := ediSigner(t)
+					user := dataprovider.User{BaseUser: sdk.BaseUser{
+						Username: "partner", Password: "password", HomeDir: t.TempDir(), Status: 1, MaxSessions: 1,
+						PublicKeys:  []string{string(ssh.MarshalAuthorizedKey(key.PublicKey()))},
+						Permissions: map[string][]string{"/": {dataprovider.PermAny}},
+					}}
+					if err := dataprovider.AddUser(&user, "test", "", ""); err != nil {
+						t.Fatal(err)
+					}
+					if atLimit {
+						active := &Connection{BaseConnection: common.NewBaseConnection("occupied", common.ProtocolSSH, "", "", user)}
+						if err := common.Connections.Add(active); err != nil {
+							t.Fatal(err)
+						}
+						defer common.Connections.Remove(active.GetID())
+						// Pin the classification and upstream-compatible refusal text.
+						_, err := loginUser(&user, method, "", nil)
+						if !errors.Is(err, errSessionLimit) || !strings.Contains(err.Error(), "too many open sessions") {
+							t.Fatalf("session refusal=%v", err)
+						}
+					}
+					password := "password"
+					if !valid {
+						password = "wrong"
+						key = ediSigner(t)
+					}
+					auth := ssh.Password(password)
+					switch method {
+					case "publickey":
+						auth = ssh.PublicKeys(key)
+					case "keyboard-interactive":
+						auth = ssh.KeyboardInteractive(func(_, _ string, questions []string, _ []bool) ([]string, error) {
+							answers := make([]string, len(questions))
+							for i := range answers {
+								answers[i] = password
+							}
+							return answers, nil
+						})
+					}
+					c := &Configuration{PasswordAuthentication: true, KeyboardInteractiveAuthentication: true, HandshakeTimeout: 2}
+					s := ediServerConfig(t, c)
+					c.configureKeyboardInteractiveAuth(s)
+					conn, done := ediAccepted(t, c, s)
+					client, err := ediClient(t, conn, auth)
+					if client != nil {
+						client.Close()
+					}
+					if (err == nil) != (valid && !atLimit) {
+						t.Fatalf("unexpected auth result: %v", err)
+					}
+					conn.Close()
+					ediWaitDone(t, done)
+					want := 0
+					if !valid {
+						want = 2
+					}
+					ediScore(t, want)
+				})
+			}
+		}
 	}
 }

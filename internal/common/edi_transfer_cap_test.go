@@ -6,7 +6,6 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/drakkan/sftpgo/v2/internal/dataprovider"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -84,6 +83,8 @@ func TestEDITransferReservations(t *testing.T) {
 		t.Fatalf("reservation leak=%d", c.pendingTransfers)
 	}
 }
+
+// Run with -race: removing the reservation mutex may preserve the count but race.
 func TestEDITransferReservationConcurrent(t *testing.T) {
 	c := ediConnections(t)
 	const cap = 7
@@ -146,8 +147,8 @@ func TestEDITransferLegacyLimits(t *testing.T) {
 	} else {
 		r()
 	}
-	isShuttingDown.Store(true)
-	defer isShuttingDown.Store(false)
+	wasShuttingDown := isShuttingDown.Swap(true)
+	defer isShuttingDown.Store(wasShuttingDown)
 	if _, err := c.ReserveTransfer("other"); !errors.Is(err, ErrShuttingDown) {
 		t.Fatal(err)
 	}
@@ -194,23 +195,15 @@ func TestEDICapacityRefusalMetrics(t *testing.T) {
 		})
 	}
 }
+
+type ediSafeDefender struct{ Defender }
+
+func (ediSafeDefender) AddEvent(string, string, HostEvent) bool { return true }
+
 func TestEDICapacitySafeHostNotCounted(t *testing.T) {
 	c := ediConnections(t)
-	if err := dataprovider.Initialize(dataprovider.Config{Driver: dataprovider.MemoryDataProviderName, BackupsPath: t.TempDir()}, t.TempDir(), false); err != nil {
-		t.Fatal(err)
-	}
-	defer dataprovider.Close()
-	dc := DefenderConfig{Enabled: true, Driver: DefenderDriverMemory, BanTime: 1, BanTimeIncrement: 1, Threshold: 100, ScoreValid: 1, ScoreInvalid: 2, ScoreLimitExceeded: 3, ObservationTime: 1, EntriesSoftLimit: 10, EntriesHardLimit: 20}
-	d, err := newInMemoryDefender(&dc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	Config.defender = d
+	Config.defender = ediSafeDefender{}
 	Config.MaxPerHostConnections = 1
-	entry := dataprovider.IPListEntry{IPOrNet: "127.0.0.1", Type: dataprovider.IPListTypeDefender, Mode: dataprovider.ListModeAllow}
-	if err := dataprovider.AddIPListEntry(&entry, "test", "", ""); err != nil {
-		t.Fatal(err)
-	}
 	c.clients.add("127.0.0.1")
 	c.clients.add("127.0.0.1")
 	before := ediRefusals(t, "max_per_host_connections")

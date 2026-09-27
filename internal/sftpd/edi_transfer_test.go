@@ -1,7 +1,8 @@
+//go:build edi
+
 package sftpd
 
 import (
-	"bytes"
 	"errors"
 	"io"
 	"net"
@@ -11,10 +12,8 @@ import (
 
 	"github.com/drakkan/sftpgo/v2/internal/common"
 	"github.com/drakkan/sftpgo/v2/internal/dataprovider"
-	"github.com/drakkan/sftpgo/v2/internal/logger"
 	"github.com/drakkan/sftpgo/v2/internal/vfs"
 	"github.com/pkg/sftp"
-	"github.com/rs/zerolog"
 	"github.com/sftpgo/sdk"
 )
 
@@ -105,13 +104,9 @@ func (ediStagingIO) WriteAt([]byte, int64) (int, error) { return 0, vfs.ErrStagi
 func (ediStagingIO) Close() error                       { return nil }
 
 // Existing generic conversion supplies SSH_FX_FAILURE in both directions. This
-// is a compatibility pin; the new guard here is duplicate Error-log suppression.
-func TestEDIStagingSFTPMappingAndNoDuplicateLogs(t *testing.T) {
+// is a compatibility pin for the staging sentinel, including read-side failures.
+func TestEDIStagingSFTPMapping(t *testing.T) {
 	ediAuthSetup(t, "")
-	var logs bytes.Buffer
-	old := *logger.GetLogger()
-	*logger.GetLogger() = zerolog.New(&logs).Level(zerolog.ErrorLevel)
-	defer func() { *logger.GetLogger() = old }()
 	for _, kind := range []int{common.TransferDownload, common.TransferUpload} {
 		user := dataprovider.User{BaseUser: sdk.BaseUser{Username: "partner"}}
 		c := common.NewBaseConnection("staging", common.ProtocolSFTP, "", "", user)
@@ -132,8 +127,5 @@ func TestEDIStagingSFTPMappingAndNoDuplicateLogs(t *testing.T) {
 		if err := tr.Close(); !errors.Is(err, sftp.ErrSSHFxFailure) {
 			t.Fatalf("CLOSE status=%v", err)
 		}
-	}
-	if logs.Len() != 0 {
-		t.Fatalf("staging wrapper's Error log duplicated by transfer: %s", logs.String())
 	}
 }
