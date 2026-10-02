@@ -656,7 +656,8 @@ type Configuration struct {
 	RateLimitersConfig []RateLimiterConfig `json:"rate_limiters" mapstructure:"rate_limiters"`
 	// Umask for new uploads. Leave blank to use the system default.
 	Umask string `json:"umask" mapstructure:"umask"`
-	// Defines the server version
+	// Defines the server version: "short" omits the version, "neutral" identifies as EDI;
+	// all other values include the engine name and version.
 	ServerVersion string `json:"server_version" mapstructure:"server_version"`
 	// TZ defines the time zone to use for the EventManager scheduler and to
 	// control time-based access restrictions. Set to "local" to use the

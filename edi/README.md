@@ -103,3 +103,20 @@ All three `limit` series are exported at 0 from startup.
 There are no IP, username, path or stage labels. The existing shared connection limit
 also applies to HTTP admin requests, so `limit="max_total_connections"` includes their
 refusals. An SSH pre-auth flood can still impede admin REST under that shared limit.
+
+## Neutral SSH identification
+
+Set `common.server_version` to `"neutral"` (environment:
+`SFTPGO_COMMON__SERVER_VERSION=neutral`) so clients see `SSH-2.0-EDI`: hosted
+clients must not see the engine name. Existing settings retain their behavior.
+The shared setting also neutralizes other users of the public server-version helper.
+Activation requires restarting `serve`; SIGHUP does not reload this setting.
+
+Neutral identification does not neutralize operator-supplied banners or hook-supplied
+prompts. Leave `sftpd.login_banner_file` empty or supply neutral text, and ensure
+keyboard-interactive hooks return neutral instructions/questions. Enabled SSH
+commands retain their names and responses; the hosted profile disables them with
+`sftpd.enabled_ssh_commands: []`. Local/SFTP-backend atomic-upload temporary files
+retain `.sftpgo-upload.*` names; these are not used by the hosted S3 profile with
+`common.upload_mode: 0`. Behavioural fingerprints, including algorithm order,
+SFTP behaviour and quota wording, remain.
