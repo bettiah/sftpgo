@@ -77,14 +77,27 @@ func Get() Info {
 	return info
 }
 
+// GetConfig returns the version configuration.
+func GetConfig() string {
+	return config
+}
+
 // SetConfig sets the version configuration
 func SetConfig(val string) {
 	config = val
 }
 
+// IsNeutral reports whether public server identification should omit the engine name.
+func IsNeutral() bool {
+	return config == "neutral"
+}
+
 // GetServerVersion returns the server version according to the configuration
 // and the provided parameters.
 func GetServerVersion(separator string, addHash bool) string {
+	if IsNeutral() {
+		return "EDI"
+	}
 	var sb strings.Builder
 	sb.WriteString(appName)
 	if config != "short" {
