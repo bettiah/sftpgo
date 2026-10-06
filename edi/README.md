@@ -88,7 +88,11 @@ or OPEN fails; CLOSE frees the active slot. Other protocols' active transfers co
 but SCP, SSH commands, FTP, WebDAV and httpd transfers are never refused by
 `max_total_transfers`. The hard bound requires `sftpd.enabled_ssh_commands: []`,
 FTP/WebDAV ports 0 and httpd user file endpoints disabled. Existing connection/per-user
-caps still apply. New-cap refusal returns `SSH_FX_FAILURE` on OPEN without a defender
+caps still apply. Under the same reservation, SFTP OPEN also refuses once the user's
+active plus pending transfers on this process reach the user's `max_sessions` (0 is
+unlimited), checked before `max_total_transfers` and against the session's login-time
+value; other protocols are not refused by it and the same hard-bound preconditions apply.
+New-cap refusal returns `SSH_FX_FAILURE` on OPEN without a defender
 event; the session remains usable. This key
 does not participate in connection admission. A per-pod download staging disk bound
 based on 5 GiB per slot assumes hosted outbound objects are at most 5 GiB; uploads'
@@ -98,8 +102,8 @@ extent cap alone does not establish that precondition.
 before authentication completes, excluding the PROXY header wait, and is released on
 success, failure, deadline, close or panic. `sftpgo_capacity_refusals_total{limit}`
 counts capacity refusals only, with `limit` equal to `max_total_connections`,
-`max_per_host_connections` or `max_total_transfers`; safelisted overruns are excluded.
-All three `limit` series are exported at 0 from startup.
+`max_per_host_connections`, `max_total_transfers` or `max_sessions`; safelisted overruns
+are excluded. All four `limit` series are exported at 0 from startup.
 There are no IP, username, path or stage labels. The existing shared connection limit
 also applies to HTTP admin requests, so `limit="max_total_connections"` includes their
 refusals. An SSH pre-auth flood can still impede admin REST under that shared limit.

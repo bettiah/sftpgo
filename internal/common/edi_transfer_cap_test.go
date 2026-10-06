@@ -29,7 +29,7 @@ func ediRefusals(t *testing.T, limit string) float64 {
 					t.Fatal("capacity metric labels must be limit only")
 				}
 				switch m.Label[0].GetValue() {
-				case "max_total_transfers", "max_total_connections", "max_per_host_connections":
+				case "max_total_transfers", "max_total_connections", "max_per_host_connections", "max_sessions":
 				default:
 					t.Fatal("unexpected metric label")
 				}
@@ -44,18 +44,18 @@ func ediRefusals(t *testing.T, limit string) float64 {
 func TestEDITransferReservations(t *testing.T) {
 	c := ediConnections(t)
 	Config.MaxTotalTransfers = 2
-	a, err := c.ReserveTransfer("a")
+	a, err := c.ReserveTransfer("a", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer a()
-	b, err := c.ReserveTransfer("b")
+	b, err := c.ReserveTransfer("b", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer b()
 	before := ediRefusals(t, "max_total_transfers")
-	if _, err := c.ReserveTransfer("c"); !errors.Is(err, ErrTransferLimit) {
+	if _, err := c.ReserveTransfer("c", 0); !errors.Is(err, ErrTransferLimit) {
 		t.Fatalf("pending reservations ignored: %v", err)
 	}
 	if ediRefusals(t, "max_total_transfers")-before != 1 {
@@ -69,12 +69,12 @@ func TestEDITransferReservations(t *testing.T) {
 	a()
 	c.transfers.add("b")
 	b() // hand off pending to active
-	d, err := c.ReserveTransfer("d")
+	d, err := c.ReserveTransfer("d", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer d()
-	if _, err := c.ReserveTransfer("e"); !errors.Is(err, ErrTransferLimit) {
+	if _, err := c.ReserveTransfer("e", 0); !errors.Is(err, ErrTransferLimit) {
 		t.Fatalf("active+pending undercount: %v", err)
 	}
 	d()
@@ -98,7 +98,7 @@ func TestEDITransferReservationConcurrent(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			release, err := c.ReserveTransfer("same-user")
+			release, err := c.ReserveTransfer("same-user", 0)
 			if err == nil {
 				successes.Add(1)
 				releases <- release
@@ -120,12 +120,114 @@ func TestEDITransferReservationConcurrent(t *testing.T) {
 		t.Fatal("leaked reservation")
 	}
 }
+
+// Removing the per-user check or its pending term must turn this red.
+func TestEDIUserTransferCap(t *testing.T) {
+	c := ediConnections(t)
+	u1, err := c.ReserveTransfer("u", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u2, err := c.ReserveTransfer("u", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	userBefore, totalBefore := ediRefusals(t, "max_sessions"), ediRefusals(t, "max_total_transfers")
+	if _, err := c.ReserveTransfer("u", 2); !errors.Is(err, ErrTransferLimit) {
+		t.Fatalf("pending reservations ignored by per-user cap: %v", err)
+	}
+	if ediRefusals(t, "max_sessions")-userBefore != 1 || ediRefusals(t, "max_total_transfers") != totalBefore {
+		t.Fatal("per-user refusal counted under the wrong limit")
+	}
+	if v, err := c.ReserveTransfer("v", 2); err != nil {
+		t.Fatalf("another user refused by u's cap: %v", err)
+	} else {
+		v()
+	}
+	for i := 0; i < 20; i++ {
+		w, err := c.ReserveTransfer("w", 0)
+		if err != nil {
+			t.Fatalf("max_sessions 0 must be unlimited: %v", err)
+		}
+		defer w()
+	}
+	c.transfers.add("u")
+	u1() // hand off pending to active
+	if _, err := c.ReserveTransfer("u", 2); !errors.Is(err, ErrTransferLimit) {
+		t.Fatalf("active+pending undercount: %v", err)
+	}
+	c.transfers.remove("u")
+	u2()
+	u3, err := c.ReserveTransfer("u", 2)
+	if err != nil {
+		t.Fatalf("capacity not restored: %v", err)
+	}
+	u3()
+	if _, ok := c.pendingByUser["u"]; ok {
+		t.Fatal("per-user reservation leaked")
+	}
+}
+
+// Run with -race: 64 same-user OPENs must admit exactly maxSessions.
+func TestEDIUserTransferCapConcurrent(t *testing.T) {
+	c := ediConnections(t)
+	const maxSessions = 3
+	var wg sync.WaitGroup
+	var successes atomic.Int32
+	start := make(chan struct{})
+	releases := make(chan func(), 64)
+	for i := 0; i < 64; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			release, err := c.ReserveTransfer("same-user", maxSessions)
+			if err == nil {
+				successes.Add(1)
+				releases <- release
+			} else if !errors.Is(err, ErrTransferLimit) {
+				t.Error(err)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(releases)
+	if successes.Load() != maxSessions {
+		t.Errorf("successful reservations=%d want exactly %d", successes.Load(), maxSessions)
+	}
+	for release := range releases {
+		release()
+	}
+	if len(c.pendingByUser) != 0 || c.pendingTransfers != 0 {
+		t.Fatal("leaked reservation")
+	}
+}
+
+// A user at its own share is not reported as process-wide exhaustion.
+func TestEDIUserTransferCapOrdering(t *testing.T) {
+	c := ediConnections(t)
+	Config.MaxTotalTransfers = 1
+	r, err := c.ReserveTransfer("u", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r()
+	userBefore, totalBefore := ediRefusals(t, "max_sessions"), ediRefusals(t, "max_total_transfers")
+	if _, err := c.ReserveTransfer("u", 1); !errors.Is(err, ErrTransferLimit) {
+		t.Fatal(err)
+	}
+	if ediRefusals(t, "max_sessions")-userBefore != 1 || ediRefusals(t, "max_total_transfers") != totalBefore {
+		t.Fatal("refusal at both caps must count as max_sessions only")
+	}
+}
+
 func TestEDITransferLegacyLimits(t *testing.T) {
 	c := ediConnections(t)
 	for _, limit := range []int{0, -1} {
 		Config.MaxTotalTransfers = limit
 		for i := 0; i < 20; i++ {
-			r, err := c.ReserveTransfer("user")
+			r, err := c.ReserveTransfer("user", 0)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -134,22 +236,22 @@ func TestEDITransferLegacyLimits(t *testing.T) {
 	}
 	Config.MaxTotalConnections = 1
 	c.transfers.add("user")
-	if _, err := c.ReserveTransfer("other"); !errors.Is(err, ErrConnectionDenied) {
+	if _, err := c.ReserveTransfer("other", 0); !errors.Is(err, ErrConnectionDenied) {
 		t.Fatalf("old global error changed: %v", err)
 	}
 	Config.MaxTotalConnections = 0
 	Config.MaxPerHostConnections = 1
-	if _, err := c.ReserveTransfer("user"); !errors.Is(err, ErrConnectionDenied) {
+	if _, err := c.ReserveTransfer("user", 0); !errors.Is(err, ErrConnectionDenied) {
 		t.Fatalf("old per-user error changed: %v", err)
 	}
-	if r, err := c.ReserveTransfer("other"); err != nil {
+	if r, err := c.ReserveTransfer("other", 0); err != nil {
 		t.Fatal(err)
 	} else {
 		r()
 	}
 	wasShuttingDown := isShuttingDown.Swap(true)
 	defer isShuttingDown.Store(wasShuttingDown)
-	if _, err := c.ReserveTransfer("other"); !errors.Is(err, ErrShuttingDown) {
+	if _, err := c.ReserveTransfer("other", 0); !errors.Is(err, ErrShuttingDown) {
 		t.Fatal(err)
 	}
 }

@@ -972,6 +972,7 @@ func (c *SSHConnection) Close() error {
 type ActiveConnections struct {
 	transferReservationMu sync.Mutex
 	pendingTransfers      int
+	pendingByUser         map[string]int // guarded by transferReservationMu
 	// clients contains both authenticated and estabilished connections and the ones waiting
 	// for authentication
 	clients clientsMap
@@ -1301,28 +1302,46 @@ func (conns *ActiveConnections) GetTotalTransfers() int32 {
 	return conns.transfers.getTotal()
 }
 
-// ErrTransferLimit reports exhaustion of the separate process-wide transfer cap.
+// ErrTransferLimit reports exhaustion of the process-wide or per-user SFTP transfer cap.
 var ErrTransferLimit = errors.New("too many concurrent transfers, retry later")
 
 // ReserveTransfer holds capacity until the caller has added its active transfer
 // or failed the OPEN. Every successful reservation must be released at handler return.
-func (conns *ActiveConnections) ReserveTransfer(username string) (func(), error) {
+// maxSessions > 0 caps the user's active plus pending transfers on this process.
+func (conns *ActiveConnections) ReserveTransfer(username string, maxSessions int) (func(), error) {
 	conns.transferReservationMu.Lock()
 	defer conns.transferReservationMu.Unlock()
 	if err := conns.IsNewTransferAllowed(username); err != nil {
 		return nil, err
+	}
+	// Checked before the process-wide cap so a user at its own share is not counted as platform exhaustion.
+	if maxSessions > 0 && username != "" && conns.transfers.getTotalFrom(username)+conns.pendingByUser[username] >= maxSessions {
+		metric.AddCapacityRefusal(metric.CapacityLimitMaxSessions)
+		return nil, ErrTransferLimit
 	}
 	if Config.MaxTotalTransfers > 0 && int(conns.transfers.getTotal())+conns.pendingTransfers >= Config.MaxTotalTransfers {
 		metric.AddCapacityRefusal(metric.CapacityLimitTotalTransfers)
 		return nil, ErrTransferLimit
 	}
 	conns.pendingTransfers++
+	if username != "" {
+		if conns.pendingByUser == nil {
+			conns.pendingByUser = make(map[string]int)
+		}
+		conns.pendingByUser[username]++
+	}
 	var once sync.Once
 	return func() {
 		once.Do(func() {
 			conns.transferReservationMu.Lock()
 			defer conns.transferReservationMu.Unlock()
 			conns.pendingTransfers--
+			if username != "" {
+				conns.pendingByUser[username]--
+				if conns.pendingByUser[username] == 0 {
+					delete(conns.pendingByUser, username)
+				}
+			}
 		})
 	}, nil
 }

@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/drakkan/sftpgo/v2/internal/common"
@@ -18,6 +19,40 @@ import (
 	"github.com/sftpgo/sdk"
 )
 
+// ediSFTPClient serves one in-memory SFTP session from a loopback client; drop
+// closes the transport and waits until the server has closed its open handles.
+func ediSFTPClient(t *testing.T, username string, maxSessions int, dir string) (*sftp.Client, func()) {
+	t.Helper()
+	user := dataprovider.User{BaseUser: sdk.BaseUser{Username: username, HomeDir: dir, Status: 1, MaxSessions: maxSessions, Permissions: map[string][]string{"/": {dataprovider.PermAny}}}}
+	c := &Connection{BaseConnection: common.NewBaseConnection("cap", common.ProtocolSFTP, "127.0.0.1:2022", "127.0.0.1:40000", user)}
+	serverConn, clientConn := net.Pipe()
+	server := sftp.NewRequestServer(serverConn, (&Configuration{}).createHandlers(c))
+	done := make(chan struct{})
+	go func() { defer close(done); defer server.Close(); server.Serve() }()
+	client, err := sftp.NewClientPipe(clientConn, clientConn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var once sync.Once
+	drop := func() {
+		once.Do(func() { client.Close(); clientConn.Close(); serverConn.Close(); <-done; c.CloseFS() })
+	}
+	t.Cleanup(drop)
+	return client, drop
+}
+
+func ediWantFailure(t *testing.T, file *sftp.File, err error) {
+	t.Helper()
+	if err == nil {
+		file.Close()
+		t.Fatal("OPEN passed at transfer cap")
+	}
+	var status *sftp.StatusError
+	if !errors.As(err, &status) || status.Code != 4 {
+		t.Fatalf("OPEN status=%v, want SSH_FX_FAILURE", err)
+	}
+}
+
 func TestEDITransferCapSFTPStatusAndRelease(t *testing.T) {
 	ediAuthSetup(t, "")
 	common.Config.MaxTotalTransfers = 1
@@ -25,20 +60,8 @@ func TestEDITransferCapSFTPStatusAndRelease(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "existing"), []byte("ok"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	user := dataprovider.User{BaseUser: sdk.BaseUser{Username: "partner", HomeDir: dir, Status: 1, Permissions: map[string][]string{"/": {dataprovider.PermAny}}}}
-	c := &Connection{BaseConnection: common.NewBaseConnection("cap", common.ProtocolSFTP, "", "", user)}
-	defer c.CloseFS()
-	serverConn, clientConn := net.Pipe()
-	server := sftp.NewRequestServer(serverConn, (&Configuration{}).createHandlers(c))
-	done := make(chan struct{})
-	go func() { defer close(done); defer server.Close(); server.Serve() }()
-	defer func() { clientConn.Close(); serverConn.Close(); <-done }()
-	client, err := sftp.NewClientPipe(clientConn, clientConn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer client.Close()
-	release, err := common.Connections.ReserveTransfer("other")
+	client, _ := ediSFTPClient(t, "partner", 0, dir)
+	release, err := common.Connections.ReserveTransfer("other", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,14 +73,7 @@ func TestEDITransferCapSFTPStatusAndRelease(t *testing.T) {
 		} else {
 			file, err = client.Open("existing")
 		}
-		if err == nil {
-			file.Close()
-			t.Fatal("OPEN passed at transfer cap")
-		}
-		var status *sftp.StatusError
-		if !errors.As(err, &status) || status.Code != 4 {
-			t.Fatalf("OPEN status=%v, want SSH_FX_FAILURE", err)
-		}
+		ediWantFailure(t, file, err)
 	}
 	if _, err := client.Stat("existing"); err != nil {
 		t.Fatalf("session unusable after refusal: %v", err)
@@ -88,6 +104,72 @@ func TestEDITransferCapSFTPStatusAndRelease(t *testing.T) {
 	}
 	if _, err := f.Write([]byte("ok")); err != nil {
 		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if common.Connections.GetTotalTransfers() != 0 {
+		t.Fatal("active transfer leaked")
+	}
+	ediScore(t, 0)
+}
+
+// The user's max_sessions also caps its concurrent SFTP handles on this process.
+func TestEDIUserTransferCapSFTP(t *testing.T) {
+	ediAuthSetup(t, "")
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "existing"), []byte("ok"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	client, drop := ediSFTPClient(t, "partner", 1, dir)
+	// A failed filesystem OPEN must release the per-user reservation.
+	if f, err := client.Open("missing"); err == nil {
+		f.Close()
+		t.Fatal("missing file opened")
+	}
+	held, err := client.Open("existing")
+	if err != nil {
+		t.Fatalf("per-user reservation leaked after failed open: %v", err)
+	}
+	f, err := client.Open("existing")
+	ediWantFailure(t, f, err)
+	f, err = client.Create("new")
+	ediWantFailure(t, f, err)
+	if _, err := client.Stat("existing"); err != nil {
+		t.Fatalf("session unusable after refusal: %v", err)
+	}
+	ediScore(t, 0)
+	// Control: another capped user is unaffected by partner's handle.
+	other, _ := ediSFTPClient(t, "other", 1, dir)
+	of, err := other.Open("existing")
+	if err != nil {
+		t.Fatalf("other user refused by partner's cap: %v", err)
+	}
+	if err := of.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := held.Close(); err != nil {
+		t.Fatal(err)
+	}
+	f, err = client.Create("new")
+	if err != nil {
+		t.Fatalf("capacity not restored after CLOSE: %v", err)
+	}
+	if _, err := f.Write([]byte("ok")); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// Dropping a connection that holds a handle must free the user's slot.
+	if _, err := client.Open("existing"); err != nil {
+		t.Fatal(err)
+	}
+	drop()
+	again, _ := ediSFTPClient(t, "partner", 1, dir)
+	f, err = again.Open("existing")
+	if err != nil {
+		t.Fatalf("capacity not restored after disconnect: %v", err)
 	}
 	if err := f.Close(); err != nil {
 		t.Fatal(err)

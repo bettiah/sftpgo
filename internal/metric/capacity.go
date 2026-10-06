@@ -8,6 +8,7 @@ const (
 	CapacityLimitTotalConnections   = "max_total_connections"
 	CapacityLimitPerHostConnections = "max_per_host_connections"
 	CapacityLimitTotalTransfers     = "max_total_transfers"
+	CapacityLimitMaxSessions        = "max_sessions"
 )
 
 // capacityLimits lists every capacity refusal label; each is exported at 0 from startup.
@@ -15,4 +16,5 @@ var capacityLimits = []string{
 	CapacityLimitTotalConnections,
 	CapacityLimitPerHostConnections,
 	CapacityLimitTotalTransfers,
+	CapacityLimitMaxSessions,
 }

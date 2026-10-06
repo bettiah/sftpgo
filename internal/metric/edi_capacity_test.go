@@ -26,6 +26,7 @@ func TestEDICapacityRefusalsAtStartup(t *testing.T) {
 				"max_total_connections":    true,
 				"max_per_host_connections": true,
 				"max_total_transfers":      true,
+				"max_sessions":             true,
 			}
 			if len(family.Metric) != len(missing) {
 				t.Fatalf("capacity refusal children = %d, want %d", len(family.Metric), len(missing))
@@ -52,5 +53,6 @@ func TestEDICapacityRefusalsAtStartup(t *testing.T) {
 	metric.AddCapacityRefusal(metric.CapacityLimitTotalConnections)
 	metric.AddCapacityRefusal(metric.CapacityLimitPerHostConnections)
 	metric.AddCapacityRefusal(metric.CapacityLimitTotalTransfers)
+	metric.AddCapacityRefusal(metric.CapacityLimitMaxSessions)
 	assertCounters(1)
 }
