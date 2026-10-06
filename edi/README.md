@@ -93,7 +93,7 @@ active plus pending transfers on this process reach the user's `max_sessions` (0
 unlimited), checked before `max_total_transfers` and against the session's login-time
 value; other protocols are not refused by it and the same hard-bound preconditions apply.
 New-cap refusal returns `SSH_FX_FAILURE` on OPEN without a defender
-event; the session remains usable. This key
+event; the session remains usable. `common.max_total_transfers`
 does not participate in connection admission. A per-pod download staging disk bound
 based on 5 GiB per slot assumes hosted outbound objects are at most 5 GiB; uploads'
 extent cap alone does not establish that precondition.
