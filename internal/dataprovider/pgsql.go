@@ -250,13 +250,23 @@ var (
 // PGSQLProvider defines the auth provider for PostgreSQL database
 type PGSQLProvider struct {
 	dbHandle *sql.DB
+	iam      *pgsqlIAMAuth
 }
+
+// The pool's connection recycle and idle limits; variables only so that tests can shorten them.
+var (
+	pgsqlConnMaxLifetime = 240 * time.Second
+	pgsqlConnMaxIdleTime = 120 * time.Second
+)
 
 func init() {
 	version.AddFeature("+pgsql")
 }
 
 func initializePGSQLProvider() error {
+	if config.AWSIAMAuth {
+		return initializePGSQLIAMProvider()
+	}
 	var dbHandle *sql.DB
 	if config.TargetSessionAttrs == "any" {
 		pgxConfig, err := pgx.ParseConfig(getPGSQLConnectionString(false))
@@ -277,20 +287,49 @@ func initializePGSQLProvider() error {
 	}
 	providerLog(logger.LevelDebug, "postgres database handle created, connection string: %q, pool size: %d",
 		getPGSQLConnectionString(true), config.PoolSize)
-	dbHandle.SetMaxOpenConns(config.PoolSize)
-	if config.PoolSize > 0 {
-		dbHandle.SetMaxIdleConns(config.PoolSize)
-	} else {
-		dbHandle.SetMaxIdleConns(2)
-	}
-	dbHandle.SetConnMaxLifetime(240 * time.Second)
-	dbHandle.SetConnMaxIdleTime(120 * time.Second)
+	setPGSQLPoolLimits(dbHandle)
 	provider = &PGSQLProvider{dbHandle: dbHandle}
 
 	ctx, cancel := context.WithTimeout(context.Background(), defaultSQLQueryTimeout)
 	defer cancel()
 
 	return dbHandle.PingContext(ctx)
+}
+
+// initializePGSQLIAMProvider opens the pool with RDS IAM authentication. Every refusal runs
+// before the first connection; the connection string is never logged in this mode.
+func initializePGSQLIAMProvider() error {
+	pgxConfig, err := parsePGSQLIAMConfig()
+	if err != nil {
+		providerLog(logger.LevelError, "%v", err)
+		return err
+	}
+	iam, err := newPGSQLIAMAuth(pgxConfig)
+	if err != nil {
+		providerLog(logger.LevelError, "%v", err)
+		return err
+	}
+	dbHandle := openPGSQLIAMHandle(pgxConfig, iam)
+	providerLog(logger.LevelDebug, "postgres database handle created with aws_iam_auth, host: %q, port: %d, user: %q, region: %q, pool size: %d",
+		iam.host, iam.port, iam.user, iam.region, config.PoolSize)
+	setPGSQLPoolLimits(dbHandle)
+	provider = &PGSQLProvider{dbHandle: dbHandle, iam: iam}
+
+	ctx, cancel := context.WithTimeout(context.Background(), defaultSQLQueryTimeout)
+	defer cancel()
+
+	return dbHandle.PingContext(ctx)
+}
+
+func setPGSQLPoolLimits(dbHandle *sql.DB) {
+	dbHandle.SetMaxOpenConns(config.PoolSize)
+	if config.PoolSize > 0 {
+		dbHandle.SetMaxIdleConns(config.PoolSize)
+	} else {
+		dbHandle.SetMaxIdleConns(2)
+	}
+	dbHandle.SetConnMaxLifetime(pgsqlConnMaxLifetime)
+	dbHandle.SetConnMaxIdleTime(pgsqlConnMaxIdleTime)
 }
 
 func getPGSQLHostsAndPorts(configHost string, configPort int) (string, string) {
@@ -326,8 +365,14 @@ func getPGSQLConnectionString(redactedPwd bool) string {
 			password = "[redacted]"
 		}
 		host, port := getPGSQLHostsAndPorts(config.Host, config.Port)
-		connectionString = fmt.Sprintf("host='%s' port='%s' dbname='%s' user='%s' password='%s' sslmode=%s connect_timeout=10",
-			host, port, config.Name, config.Username, password, getSSLMode())
+		if config.AWSIAMAuth {
+			// The auth token is the only password in IAM mode.
+			connectionString = fmt.Sprintf("host='%s' port='%s' dbname='%s' user='%s' sslmode=%s connect_timeout=10",
+				host, port, config.Name, config.Username, getSSLMode())
+		} else {
+			connectionString = fmt.Sprintf("host='%s' port='%s' dbname='%s' user='%s' password='%s' sslmode=%s connect_timeout=10",
+				host, port, config.Name, config.Username, password, getSSLMode())
+		}
 		if config.RootCert != "" {
 			connectionString += fmt.Sprintf(" sslrootcert='%s'", config.RootCert)
 		}

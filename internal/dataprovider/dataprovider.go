@@ -404,6 +404,12 @@ type Config struct {
 	// Custom database connection string.
 	// If not empty this connection string will be used instead of build one using the previous parameters
 	ConnectionString string `json:"connection_string" mapstructure:"connection_string"`
+	// AWSIAMAuth authenticates to PostgreSQL with an RDS IAM auth token built for every
+	// physical connection (EDI). Only the postgresql driver supports it.
+	AWSIAMAuth bool `json:"aws_iam_auth" mapstructure:"aws_iam_auth"`
+	// AWSIAMRegion is the region of the RDS IAM auth token. Empty uses the AWS SDK default
+	// chain, such as AWS_REGION.
+	AWSIAMRegion string `json:"aws_iam_region" mapstructure:"aws_iam_region"`
 	// prefix for SQL tables
 	SQLTablesPrefix string `json:"sql_tables_prefix" mapstructure:"sql_tables_prefix"`
 	// Set the preferred way to track users quota between the following choices:

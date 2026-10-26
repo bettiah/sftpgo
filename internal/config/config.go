@@ -345,6 +345,8 @@ func Init() {
 			Username:           "",
 			Password:           "",
 			ConnectionString:   "",
+			AWSIAMAuth:         false,
+			AWSIAMRegion:       "",
 			SQLTablesPrefix:    "",
 			SSLMode:            0,
 			DisableSNI:         false,
@@ -2162,6 +2164,8 @@ func setViperDefaults() {
 	viper.SetDefault("data_provider.client_cert", globalConf.ProviderConf.ClientCert)
 	viper.SetDefault("data_provider.client_key", globalConf.ProviderConf.ClientKey)
 	viper.SetDefault("data_provider.connection_string", globalConf.ProviderConf.ConnectionString)
+	viper.SetDefault("data_provider.aws_iam_auth", globalConf.ProviderConf.AWSIAMAuth)
+	viper.SetDefault("data_provider.aws_iam_region", globalConf.ProviderConf.AWSIAMRegion)
 	viper.SetDefault("data_provider.sql_tables_prefix", globalConf.ProviderConf.SQLTablesPrefix)
 	viper.SetDefault("data_provider.track_quota", globalConf.ProviderConf.TrackQuota)
 	viper.SetDefault("data_provider.pool_size", globalConf.ProviderConf.PoolSize)

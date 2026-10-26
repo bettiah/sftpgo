@@ -124,3 +124,51 @@ commands retain their names and responses; the hosted profile disables them with
 retain `.sftpgo-upload.*` names; these are not used by the hosted S3 profile with
 `common.upload_mode: 0`. Behavioural fingerprints, including algorithm order,
 SFTP behaviour and quota wording, remain.
+
+## RDS IAM database authentication
+
+`data_provider.aws_iam_auth` (default `false`; `SFTPGO_DATA_PROVIDER__AWS_IAM_AUTH`) makes the
+PostgreSQL provider authenticate with an RDS IAM auth token instead of a password. The AWS SDK
+configuration is loaded once at provider start; every physical connection then builds a fresh
+token for its `host:port` and user, from the SDK credentials cache, in pgx's `BeforeConnect`
+(the existing host randomisation is kept). `data_provider.aws_iam_region`
+(`SFTPGO_DATA_PROVIDER__AWS_IAM_REGION`) sets the token region; empty uses the SDK chain, such
+as `AWS_REGION`. Credentials come from the SDK default chain (IRSA web identity in EKS). Both
+`initprovider` and `serve` use it.
+
+Startup refuses, before any connection or token build: a driver other than `postgresql`
+(CockroachDB included); `data_provider.password`; `PGPASSWORD`, `PGPASSFILE`, `PGSERVICE` or
+`PGSERVICEFILE` present in the environment, even empty; a connection-string key outside
+`host port dbname user sslmode connect_timeout sslrootcert sslcert sslkey sslsni
+target_session_attrs default_query_exec_mode`; and, on the parsed configuration, any password
+(which also catches a default `~/.pgpass` entry or a service file), more than one host or any
+fallback, TLS other than verify-full, and no region. The generated connection string has no
+password key, and IAM mode never logs the connection string; a parse error's quoted string is
+replaced by `[redacted]`.
+
+The credential client is bounded, because the SDK cache runs a shared refresh under a context
+without deadline and the default HTTP client has no response timeout: connect and TLS
+handshake 2 s, response headers 3 s, each request 4 s, at most 2 attempts. A refresh against
+an endpoint that accepts the connection and never answers therefore ends, and the next
+connect after recovery starts a new one without a restart. Each connect waits at most 10 s in
+the hook, which pgx runs before the DSN's `connect_timeout` applies; a caller's cancellation
+also ends its wait.
+
+Failure signal: every failed token build logs one Error line starting
+`iam auth: token build failed` (class `credentials`, `signer`, `timeout` or `canceled`, plus an
+AWS error code when one exists), and every other failed IAM-mode connect logs one Error line
+starting `iam auth: connect failed` (class `auth`, `server`, `tls`, `timeout`, `canceled`,
+`network` or `other`, plus the SQLSTATE when one exists). A failed build is not also logged as a
+connect failure. Both lines carry non-secret counters (`builds`, `build_failures`,
+`connect_attempts`, `connects`, `connect_failures`) and the expiry of the credentials last used.
+The first success after failures logs one Info line starting `iam auth recovered:`. Lines
+carry no token, key, raw SDK error or connection string. There is no new Prometheus series,
+and `/healthz` is unchanged: it does not check the database.
+
+The connection lifetime stays 240 s and idle time 120 s, so during an STS outage new connects
+fail once the cached credentials can no longer be refreshed, and pooled connections end within
+about one lifetime after that (expiry is lazy, on reuse). Local tests use stub credentials, a
+local TLS PostgreSQL protocol fake and a local fake STS endpoint; they make no AWS call.
+`edi/test.sh` runs the real-PostgreSQL leg only when `SFTPGO_EDI_PG_ADMIN_URL` names a local
+superuser URL, and says so when it skips it. Real IAM login, IRSA refresh and the STS-cut
+window need real AWS qualification.
