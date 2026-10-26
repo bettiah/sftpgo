@@ -24,13 +24,15 @@ import (
 )
 
 // ediFakeSTS is a local TLS endpoint for AssumeRoleWithWebIdentity. In stall mode it accepts
-// the connection and the request and never answers.
+// the connection and the request and never answers; in body-stall mode it sends the response
+// headers and then never sends the body.
 type ediFakeSTS struct {
-	srv      *httptest.Server
-	stall    atomic.Bool
-	requests atomic.Int64
-	keyID    string
-	release  chan struct{}
+	srv       *httptest.Server
+	stall     atomic.Bool
+	bodyStall atomic.Bool
+	requests  atomic.Int64
+	keyID     string
+	release   chan struct{}
 }
 
 func (f *ediFakeSTS) handler() http.Handler {
@@ -38,7 +40,14 @@ func (f *ediFakeSTS) handler() http.Handler {
 		f.requests.Add(1)
 		// Reading the body lets net/http cancel the request context when the client hangs up.
 		_, _ = io.Copy(io.Discard, r.Body)
-		if f.stall.Load() {
+		if f.bodyStall.Load() {
+			w.Header().Set("Content-Type", "text/xml")
+			w.WriteHeader(http.StatusOK)
+			if fl, ok := w.(http.Flusher); ok {
+				fl.Flush()
+			}
+		}
+		if f.stall.Load() || f.bodyStall.Load() {
 			select {
 			case <-r.Context().Done():
 			case <-f.release:
@@ -72,7 +81,16 @@ func ediStartFakeSTS(t *testing.T, ln net.Listener) *ediFakeSTS {
 	t.Cleanup(func() {
 		close(f.release)
 		f.srv.CloseClientConnections()
-		f.srv.Close()
+		done := make(chan struct{})
+		go func() {
+			f.srv.Close()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("the fake STS did not shut down")
+		}
 	})
 	return f
 }
@@ -99,6 +117,7 @@ func ediWebIdentityEnv(t *testing.T, endpoint string, caPEM []byte) {
 	iamSTSConnectTimeout = 200 * time.Millisecond
 	iamSTSResponseTimeout = 250 * time.Millisecond
 	iamSTSRequestTimeout = 300 * time.Millisecond
+	iamSTSMaxBackoff = 50 * time.Millisecond
 }
 
 // ediIAMHandle opens the IAM pool with the production credential chain and no idle
@@ -146,13 +165,14 @@ const ediBuildFailed = "iam auth: token build failed"
 // the shared refresh ends within its budget, and connects recover without a restart.
 func TestEDIIAMStalledSTSRecovers(t *testing.T) {
 	for _, tc := range []struct {
-		name         string
-		tokenTimeout time.Duration
+		name          string
+		tokenTimeout  time.Duration
+		countAttempts bool
 	}{
 		// The refresh budget ends first (production ordering): the refresh itself times out.
-		{"refresh budget first", 2 * time.Second},
+		{"refresh budget first", 2 * time.Second, true},
 		// The hook deadline ends first: the caller stops waiting while the refresh continues.
-		{"hook deadline first", 100 * time.Millisecond},
+		{"hook deadline first", 100 * time.Millisecond, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			logPath := ediIAMSetup(t)
@@ -160,6 +180,10 @@ func TestEDIIAMStalledSTSRecovers(t *testing.T) {
 			sts := ediStartFakeSTS(t, nil)
 			ediWebIdentityEnv(t, sts.srv.URL, ediSTSCertPEM(sts))
 			iamTokenTimeout = tc.tokenTimeout
+			if !tc.countAttempts {
+				// A refresh that outlasts the hook deadline, so only that deadline can end the wait.
+				iamSTSResponseTimeout, iamSTSRequestTimeout = time.Second, time.Second
+			}
 			db, a := ediIAMHandle(t, pg)
 
 			sts.stall.Store(true)
@@ -168,10 +192,16 @@ func TestEDIIAMStalledSTSRecovers(t *testing.T) {
 				t.Fatal("connect succeeded against a stalled STS")
 			}
 			// Bounded by the hook deadline and by the request budget, never by the stall.
-			if elapsed := time.Since(start); elapsed > tc.tokenTimeout+500*time.Millisecond {
+			if elapsed := time.Since(start); elapsed > tc.tokenTimeout+300*time.Millisecond {
 				t.Fatalf("the hook waited %v", elapsed)
 			}
-			if sts.requests.Load() == 0 {
+			if tc.countAttempts {
+				// The refresh ended before the caller gave up: exactly the attempt budget.
+				time.Sleep(300 * time.Millisecond)
+				if got := sts.requests.Load(); got != int64(iamSTSMaxAttempts) {
+					t.Fatalf("%d STS attempts, want %d", got, iamSTSMaxAttempts)
+				}
+			} else if sts.requests.Load() == 0 {
 				t.Fatal("the stalled endpoint saw no request")
 			}
 			log := ediReadLog(t, logPath)
@@ -200,6 +230,9 @@ func TestEDIIAMStalledSTSRecovers(t *testing.T) {
 				}
 			}
 			log = ediReadLog(t, logPath)
+			if n := strings.Count(log, "iam auth credentials: expiry changed"); n < 2 {
+				t.Fatalf("%d credential snapshots across refreshed one-second credentials", n)
+			}
 			if a.buildFailures.Load() != failures || int64(strings.Count(log, ediBuildFailed)) != failures ||
 				!strings.Contains(log, "iam auth recovered: token build succeeded") {
 				t.Fatal("the failure signal did not stop after recovery")
@@ -275,5 +308,97 @@ func TestEDIIAMCallerCancellation(t *testing.T) {
 	}
 	if !strings.Contains(ediReadLog(t, logPath), ediBuildFailed+", class: canceled") {
 		t.Fatal("no canceled-class build failure line")
+	}
+}
+
+// Headers arrive and the body never does: only the overall request timeout ends the attempt
+// (the response-header timeout has nothing to wait for), within the attempt budget.
+func TestEDIIAMBodyStalledSTSIsBounded(t *testing.T) {
+	logPath := ediIAMSetup(t)
+	pg := ediStartFakePG(t)
+	sts := ediStartFakeSTS(t, nil)
+	ediWebIdentityEnv(t, sts.srv.URL, ediSTSCertPEM(sts))
+	iamSTSResponseTimeout = 10 * time.Second
+	iamTokenTimeout = 6 * time.Second
+	db, _ := ediIAMHandle(t, pg)
+	sts.bodyStall.Store(true)
+	start := time.Now()
+	if err := db.PingContext(context.Background()); err == nil {
+		t.Fatal("connect succeeded against a body-stalled STS")
+	}
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Fatalf("the refresh ran %v: the request timeout did not end it", elapsed)
+	}
+	time.Sleep(300 * time.Millisecond)
+	if got := sts.requests.Load(); got < 1 || got > int64(iamSTSMaxAttempts) {
+		t.Fatalf("%d STS attempts, want 1..%d", got, iamSTSMaxAttempts)
+	}
+	if !strings.Contains(ediReadLog(t, logPath), ediBuildFailed+", class: ") {
+		t.Fatal("no build failure line")
+	}
+	sts.bodyStall.Store(false)
+	ediPingUntilOK(t, db)
+}
+
+// Concurrent connects share one refresh through the cache: one waiter cancels, the others
+// recover through that same refresh once STS answers, and a later refresh also succeeds.
+func TestEDIIAMConcurrentWaitersShareRefresh(t *testing.T) {
+	logPath := ediIAMSetup(t)
+	pg := ediStartFakePG(t)
+	sts := ediStartFakeSTS(t, nil)
+	ediWebIdentityEnv(t, sts.srv.URL, ediSTSCertPEM(sts))
+	iamTokenTimeout = 6 * time.Second
+	db, a := ediIAMHandle(t, pg)
+	db.SetMaxOpenConns(4)
+	sts.stall.Store(true)
+
+	type result struct {
+		err     error
+		elapsed time.Duration
+	}
+	results := make([]chan result, 4)
+	for i := range results {
+		results[i] = make(chan result, 1)
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
+		if i == 0 {
+			time.AfterFunc(50*time.Millisecond, cancel)
+		}
+		go func() {
+			start := time.Now()
+			err := db.PingContext(ctx)
+			results[i] <- result{err, time.Since(start)}
+		}()
+	}
+	// The first attempt is stalled; let STS answer the retry.
+	time.Sleep(100 * time.Millisecond)
+	sts.stall.Store(false)
+	for i, ch := range results {
+		r := <-ch
+		if i == 0 {
+			if r.err == nil || r.elapsed > time.Second {
+				t.Fatalf("the canceled waiter: err=%v after %v", r.err, r.elapsed)
+			}
+			continue
+		}
+		if r.err != nil {
+			t.Fatalf("waiter %d: %v", i, r.err)
+		}
+	}
+	if got := sts.requests.Load(); got != 2 {
+		t.Fatalf("%d STS requests: the waiters did not share one refresh (stalled attempt plus retry)", got)
+	}
+	log := ediReadLog(t, logPath)
+	if !strings.Contains(log, ediBuildFailed+", class: canceled") || a.buildFailures.Load() != 1 {
+		t.Fatalf("want exactly the canceled waiter's failure line, failures %d", a.buildFailures.Load())
+	}
+	// The same auth object refreshes again once the one-second credentials expire.
+	time.Sleep(1100 * time.Millisecond)
+	before := sts.requests.Load()
+	if err := db.PingContext(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if sts.requests.Load() != before+1 {
+		t.Fatal("no fresh refresh after expiry")
 	}
 }

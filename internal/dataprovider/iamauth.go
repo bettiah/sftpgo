@@ -16,12 +16,15 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/aws/retry"
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/feature/rds/auth"
@@ -53,9 +56,10 @@ var errPGSQLIAMTokenBuild = errors.New("unable to build the RDS IAM auth token")
 // shared by every waiter, and the SDK's default HTTP client has no overall or response
 // timeout. A refresh against an endpoint that accepts the connection and never answers would
 // therefore stay pending, and every later connect would wait on it. The STS client used here
-// gets finite connect, response and request timeouts and a bounded number of attempts, so a
-// refresh always ends (worst case about iamSTSMaxAttempts × iamSTSRequestTimeout plus one
-// retry backoff of at most a second) and the next connect after the network recovers starts
+// gets finite connect, response and request timeouts, a bounded number of attempts and a
+// capped retry backoff, so a refresh always ends (at most iamSTSMaxAttempts ×
+// iamSTSRequestTimeout plus one iamSTSMaxBackoff, about 9 s; the SDK default backoff would be
+// up to about 2 s for the first retry) and the next connect after the network recovers starts
 // a fresh one. iamTokenTimeout separately bounds how long a connect waits in the hook, which
 // pgx runs before its own connect_timeout applies.
 var (
@@ -64,10 +68,16 @@ var (
 	iamSTSResponseTimeout = 3 * time.Second
 	iamSTSRequestTimeout  = 4 * time.Second
 	iamSTSMaxAttempts     = 2
+	iamSTSMaxBackoff      = time.Second
 	iamLoadAWSConfig      = func(ctx context.Context, region string) (aws.Config, error) {
 		opts := []func(*awsconfig.LoadOptions) error{
 			awsconfig.WithHTTPClient(newIAMHTTPClient()),
-			awsconfig.WithRetryMaxAttempts(iamSTSMaxAttempts),
+			awsconfig.WithRetryer(func() aws.Retryer {
+				return retry.NewStandard(func(o *retry.StandardOptions) {
+					o.MaxAttempts = iamSTSMaxAttempts
+					o.MaxBackoff = iamSTSMaxBackoff
+				})
+			}),
 		}
 		if region != "" {
 			opts = append(opts, awsconfig.WithRegion(region))
@@ -108,6 +118,7 @@ type pgsqlIAMAuth struct {
 	buildFailures   atomic.Int64
 	// Unix seconds of the credentials used by the last successful build, 0 if they never expire.
 	credentialsExpire atomic.Int64
+	expirySeen        atomic.Bool
 	// Set by a failure and cleared, with one recovery line, by the next success.
 	buildFailing   atomic.Bool
 	connectFailing atomic.Bool
@@ -141,9 +152,6 @@ func checkPGSQLIAMConnConfig(cfg *pgx.ConnConfig) error {
 
 // parsePGSQLIAMConfig parses the connection settings with the IAM key allow-list and refusals.
 func parsePGSQLIAMConfig() (*pgx.ConnConfig, error) {
-	if config.Driver != PGSQLDataProviderName {
-		return nil, fmt.Errorf("aws_iam_auth: requires the %q driver", PGSQLDataProviderName)
-	}
 	if config.Password != "" {
 		return nil, errors.New("aws_iam_auth: data_provider.password is set; IAM authentication accepts no other password source")
 	}
@@ -154,17 +162,46 @@ func parsePGSQLIAMConfig() (*pgx.ConnConfig, error) {
 		ParseConfigOptions: pgconn.ParseConfigOptions{ConnStringAllowedKeys: pgsqlIAMAllowedKeys},
 	})
 	if err != nil {
-		var parseErr *pgconn.ParseConfigError
-		if errors.As(err, &parseErr) {
-			// The error quotes the connection string with best-effort redaction only.
-			parseErr.ConnString = "[redacted]"
-		}
-		return nil, fmt.Errorf("aws_iam_auth: invalid connection settings: %w", err)
+		return nil, fmt.Errorf("aws_iam_auth: invalid connection settings (%s)", classifyIAMParseError(err))
 	}
 	if err := checkPGSQLIAMConnConfig(cfg); err != nil {
 		return nil, err
 	}
 	return cfg, nil
+}
+
+// pgsqlIAMNamedKeys are the libpq and pgx keys a parse refusal may name. Any other key text
+// came from the connection string itself and may be a fragment of a secret.
+var pgsqlIAMNamedKeys = []string{"password", "passfile", "service", "servicefile", "sslpassword", "sslnegotiation",
+	"application_name", "options", "krbsrvname", "krbspn", "require_auth", "channel_binding", "min_protocol_version",
+	"max_protocol_version", "database", "statement_cache_capacity", "description_cache_capacity", "ssl"}
+
+var pgsqlIAMDisallowedKey = regexp.MustCompile(`connection string key "([^"]*)" is not in ConnStringAllowedKeys`)
+
+// classifyIAMParseError reduces a pgx parse error to a fixed description. The parser's text
+// quotes connection-string fragments, so it is matched here and never returned or logged.
+func classifyIAMParseError(err error) string {
+	msg := err.Error()
+	if m := pgsqlIAMDisallowedKey.FindStringSubmatch(msg); m != nil {
+		if slices.Contains(pgsqlIAMNamedKeys, m[1]) {
+			return fmt.Sprintf("key %q is not allowed", m[1])
+		}
+		return "a key outside the allow-list"
+	}
+	switch {
+	case strings.Contains(msg, "failed to parse as keyword/value"):
+		return "malformed keyword/value syntax"
+	case strings.Contains(msg, "failed to parse as URL"):
+		return "malformed URI"
+	case strings.Contains(msg, "failed to configure TLS"):
+		return "TLS files or settings rejected"
+	case strings.Contains(msg, "invalid port"), strings.Contains(msg, "port numbers"):
+		return "invalid port"
+	case strings.Contains(msg, "invalid connect_timeout"):
+		return "invalid connect_timeout"
+	default:
+		return "unparseable settings"
+	}
 }
 
 func newPGSQLIAMAuth(cfg *pgx.ConnConfig) (*pgsqlIAMAuth, error) {
@@ -173,7 +210,8 @@ func newPGSQLIAMAuth(cfg *pgx.ConnConfig) (*pgsqlIAMAuth, error) {
 
 	awsCfg, err := iamLoadAWSConfig(ctx, config.AWSIAMRegion)
 	if err != nil {
-		return nil, fmt.Errorf("aws_iam_auth: unable to load the AWS SDK configuration: %w", err)
+		// The loader's text can quote shared-config content; only the error type is kept.
+		return nil, fmt.Errorf("aws_iam_auth: unable to load the AWS SDK configuration (%T)", err)
 	}
 	if awsCfg.Region == "" {
 		return nil, errors.New("aws_iam_auth: no AWS region; set data_provider.aws_iam_region or AWS_REGION")
@@ -205,11 +243,6 @@ func (a *pgsqlIAMAuth) token(ctx context.Context, host string, port uint16, user
 	class := "credentials"
 	var token string
 	if err == nil {
-		expire := int64(0)
-		if creds.CanExpire {
-			expire = creds.Expires.Unix()
-		}
-		a.credentialsExpire.Store(expire)
 		frozen := aws.CredentialsProviderFunc(func(context.Context) (aws.Credentials, error) { return creds, nil })
 		class = "signer"
 		token, err = iamBuildToken(ctx, net.JoinHostPort(host, strconv.Itoa(int(port))), a.region, user, frozen)
@@ -223,6 +256,15 @@ func (a *pgsqlIAMAuth) token(ctx context.Context, host string, port uint16, user
 	}
 	if a.buildFailing.Swap(false) {
 		providerLog(logger.LevelInfo, "iam auth recovered: token build succeeded, %s", a.counters())
+	}
+	expire := int64(0)
+	if creds.CanExpire {
+		expire = creds.Expires.Unix()
+	}
+	// A non-secret snapshot whenever the credentials in use change, so refreshes are visible.
+	changed := a.credentialsExpire.Swap(expire) != expire
+	if first := !a.expirySeen.Swap(true); changed || first {
+		providerLog(logger.LevelInfo, "iam auth credentials: expiry changed, %s", a.counters())
 	}
 	return token, nil
 }
@@ -272,6 +314,8 @@ func (c *pgsqlIAMConnector) Connect(ctx context.Context) (driver.Conn, error) {
 	if c.auth.connectFailing.Swap(false) {
 		providerLog(logger.LevelInfo, "iam auth recovered: connect succeeded, %s", c.auth.counters())
 	}
+	// One line per physical connect (every 240 s per pooled connection) for qualification.
+	providerLog(logger.LevelDebug, "iam auth connect ok, %s", c.auth.counters())
 	return conn, nil
 }
 

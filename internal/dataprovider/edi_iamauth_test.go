@@ -17,6 +17,7 @@ import (
 	"encoding/hex"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"math/big"
 	"net"
 	"os"
@@ -251,8 +252,10 @@ func ediIAMSetup(t *testing.T) string {
 	prevLifetime, prevIdle := pgsqlConnMaxLifetime, pgsqlConnMaxIdleTime
 	prevLoad, prevBuild := iamLoadAWSConfig, iamBuildToken
 	prevToken, prevSTS := iamTokenTimeout, [3]time.Duration{iamSTSConnectTimeout, iamSTSResponseTimeout, iamSTSRequestTimeout}
+	prevAttempts, prevBackoff := iamSTSMaxAttempts, iamSTSMaxBackoff
 	t.Cleanup(func() {
 		iamTokenTimeout = prevToken
+		iamSTSMaxAttempts, iamSTSMaxBackoff = prevAttempts, prevBackoff
 		iamSTSConnectTimeout, iamSTSResponseTimeout, iamSTSRequestTimeout = prevSTS[0], prevSTS[1], prevSTS[2]
 		if p, ok := provider.(*PGSQLProvider); ok && p != prevProvider {
 			_ = p.close()
@@ -307,39 +310,52 @@ func TestEDIIAMRefusals(t *testing.T) {
 	pgpassLine := "*:*:*:*:pgpass-" + "fixture\n"
 	serviceFile := "[edi]\nhost=localhost\npassword=service-fixture\n"
 	cases := []struct {
-		name   string
-		mutate func(t *testing.T, c *Config)
-		want   string
+		name    string
+		mutate  func(t *testing.T, c *Config)
+		want    string
+		secrets []string
 	}{
-		{"driver", func(_ *testing.T, c *Config) { c.Driver = CockroachDataProviderName }, `requires the "postgresql" driver`},
-		{"config password", func(_ *testing.T, c *Config) { c.Password = "x" }, "data_provider.password is set"},
-		{"PGPASSWORD", func(t *testing.T, _ *Config) { t.Setenv("PGPASSWORD", "x") }, "PGPASSWORD is set"},
-		{"PGPASSWORD empty", func(t *testing.T, _ *Config) { t.Setenv("PGPASSWORD", "") }, "PGPASSWORD is set"},
-		{"PGPASSFILE", func(t *testing.T, _ *Config) { t.Setenv("PGPASSFILE", "/nonexistent") }, "PGPASSFILE is set"},
-		{"PGSERVICE", func(t *testing.T, _ *Config) { t.Setenv("PGSERVICE", "edi") }, "PGSERVICE is set"},
-		{"PGSERVICEFILE", func(t *testing.T, _ *Config) { t.Setenv("PGSERVICEFILE", "/nonexistent") }, "PGSERVICEFILE is set"},
+		{"config password", func(_ *testing.T, c *Config) { c.Password = "x" }, "data_provider.password is set", nil},
+		{"PGPASSWORD", func(t *testing.T, _ *Config) { t.Setenv("PGPASSWORD", "x") }, "PGPASSWORD is set", nil},
+		{"PGPASSWORD empty", func(t *testing.T, _ *Config) { t.Setenv("PGPASSWORD", "") }, "PGPASSWORD is set", nil},
+		{"PGPASSFILE", func(t *testing.T, _ *Config) { t.Setenv("PGPASSFILE", "/nonexistent") }, "PGPASSFILE is set", nil},
+		{"PGSERVICE", func(t *testing.T, _ *Config) { t.Setenv("PGSERVICE", "edi") }, "PGSERVICE is set", nil},
+		{"PGSERVICEFILE", func(t *testing.T, _ *Config) { t.Setenv("PGSERVICEFILE", "/nonexistent") }, "PGSERVICEFILE is set", nil},
 		{"default pgpass", func(t *testing.T, _ *Config) {
 			if err := os.WriteFile(filepath.Join(os.Getenv("HOME"), ".pgpass"), []byte(pgpassLine), 0600); err != nil {
 				t.Fatal(err)
 			}
-		}, "effective configuration has a password"},
-		{"two hosts", func(_ *testing.T, c *Config) { c.Host = "localhost,127.0.0.1" }, "more than one host"},
-		{"sslmode require", func(_ *testing.T, c *Config) { c.SSLMode = 1; c.RootCert = "" }, "TLS is not verify-full"},
-		{"sslmode verify-ca", func(_ *testing.T, c *Config) { c.SSLMode = 2 }, "TLS is not verify-full"},
-		{"sslmode prefer", func(_ *testing.T, c *Config) { c.SSLMode = 4 }, "more than one host or a TLS fallback"},
-		{"sslmode disable", func(_ *testing.T, c *Config) { c.SSLMode = 0 }, "TLS is not verify-full"},
+		}, "effective configuration has a password", []string{"pgpass-fixture"}},
+		{"two hosts", func(_ *testing.T, c *Config) { c.Host = "localhost,127.0.0.1" }, "more than one host", nil},
+		{"sslmode require", func(_ *testing.T, c *Config) { c.SSLMode = 1; c.RootCert = "" }, "TLS is not verify-full", nil},
+		{"sslmode verify-ca", func(_ *testing.T, c *Config) { c.SSLMode = 2 }, "TLS is not verify-full", nil},
+		{"sslmode prefer", func(_ *testing.T, c *Config) { c.SSLMode = 4 }, "more than one host or a TLS fallback", nil},
+		{"sslmode disable", func(_ *testing.T, c *Config) { c.SSLMode = 0 }, "TLS is not verify-full", nil},
 		{"connection string password", func(_ *testing.T, c *Config) {
 			c.ConnectionString = "host=localhost dbname=edi user=sftpgo_app sslmode=verify-full password=conn-fixture"
-		}, `key "password" is not in ConnStringAllowedKeys`},
+		}, `invalid connection settings (key "password" is not allowed)`, []string{"conn-fixture"}},
 		{"connection string service", func(_ *testing.T, c *Config) {
 			c.ConnectionString = "service=edi sslmode=verify-full"
-		}, `key "service" is not in ConnStringAllowedKeys`},
+		}, `invalid connection settings (key "service" is not allowed)`, nil},
 		{"connection string passfile", func(_ *testing.T, c *Config) {
 			c.ConnectionString = "host=localhost sslmode=verify-full passfile=/nonexistent"
-		}, `key "passfile" is not in ConnStringAllowedKeys`},
+		}, `invalid connection settings (key "passfile" is not allowed)`, nil},
+		// Malformed strings: the parser quotes fragments, which may be parts of a password.
+		{"malformed keyword string", func(_ *testing.T, c *Config) {
+			c.ConnectionString = "host=localhost password=Zq9alpha Xk7bravo sslmode=verify-full"
+		}, "invalid connection settings (malformed keyword/value syntax)", []string{"Zq9alpha", "Xk7bravo"}},
+		{"unknown key text", func(_ *testing.T, c *Config) {
+			c.ConnectionString = "Tj6foxtrot=1 host=localhost sslmode=verify-full"
+		}, "invalid connection settings (a key outside the allow-list)", []string{"Tj6foxtrot", "tj6foxtrot"}},
+		{"malformed URI", func(_ *testing.T, c *Config) {
+			c.ConnectionString = "postgres://sftpgo_app:Wm3charlie%ZZ@localhost/edi?sslmode=verify-full"
+		}, "invalid connection settings (malformed URI)", []string{"Wm3charlie"}},
+		{"URI password in the port position", func(_ *testing.T, c *Config) {
+			c.ConnectionString = "postgres://sftpgo_app:Pd4delta:Rf5echo@localhost/edi?sslmode=verify-full"
+		}, "invalid connection settings (", []string{"Pd4delta", "Rf5echo"}},
 		{"no region", func(_ *testing.T, _ *Config) {
 			iamLoadAWSConfig = ediFakeAWS(&ediFakeCreds{secret: "x"}, "")
-		}, "no AWS region"},
+		}, "no AWS region", nil},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -361,7 +377,7 @@ func TestEDIIAMRefusals(t *testing.T) {
 			if builds.Load() != 0 || s.accepted.Load() != before {
 				t.Fatalf("refusal after a token build or connect: builds=%d", builds.Load())
 			}
-			for _, secret := range []string{"conn-fixture", "pgpass-fixture", "service-fixture"} {
+			for _, secret := range append([]string{"conn-fixture", "pgpass-fixture", "service-fixture"}, tc.secrets...) {
 				if strings.Contains(err.Error(), secret) || strings.Contains(ediReadLog(t, logPath), secret) {
 					t.Fatalf("refusal leaked %q", secret)
 				}
@@ -487,6 +503,58 @@ func TestEDIIAMTokenPerPhysicalConnect(t *testing.T) {
 	if strings.Contains(log, "iam auth: ") {
 		t.Fatal("a failure line without a failure")
 	}
+	// Healthy observability: one snapshot for the one credential expiry, one debug line per
+	// physical connect, with the final counters.
+	if n := strings.Count(log, "iam auth credentials: expiry changed"); n != 1 {
+		t.Fatalf("%d credential snapshots for one expiry", n)
+	}
+	if n := strings.Count(log, "iam auth connect ok, "); n != len(pwds) {
+		t.Fatalf("%d connect-ok lines for %d connects", n, len(pwds))
+	}
+	if !strings.Contains(log, fmt.Sprintf("connect_attempts: %d, connects: %d, connect_failures: 0", len(pwds), len(pwds))) {
+		t.Fatal("the final counters are not observable")
+	}
+}
+
+// The driver refusal sits in the shared dispatch, so no other driver can run with the flag
+// on, whatever entry point starts it; with the flag off, dispatch is unchanged.
+func TestEDIIAMDispatchRefusesOtherDrivers(t *testing.T) {
+	for _, driver := range []string{MemoryDataProviderName, SQLiteDataProviderName, MySQLDataProviderName,
+		BoltDataProviderName, CockroachDataProviderName, "nosuchdriver"} {
+		t.Run(driver, func(t *testing.T) {
+			ediIAMSetup(t)
+			base := t.TempDir()
+			cnf := Config{Driver: driver, AWSIAMAuth: true, BackupsPath: "backups", Name: "edi"}
+			entries := map[string]func() error{
+				"createProvider":     func() error { config = cnf; return createProvider(base) },
+				"Initialize":         func() error { return Initialize(cnf, base, false) },
+				"InitializeDatabase": func() error { return InitializeDatabase(cnf, base) },
+				"ResetDatabase":      func() error { return ResetDatabase(cnf, base) },
+				"RevertDatabase":     func() error { return RevertDatabase(cnf, base, 1) },
+			}
+			for name, entry := range entries {
+				provider = nil
+				err := entry()
+				if err == nil || !strings.Contains(err.Error(), `aws_iam_auth: requires the "postgresql" driver`) {
+					t.Fatalf("%s: err=%v", name, err)
+				}
+				if provider != nil {
+					t.Fatalf("%s: a provider was initialized", name)
+				}
+			}
+		})
+	}
+	t.Run("flag off", func(t *testing.T) {
+		ediIAMSetup(t)
+		provider = nil
+		config = Config{Driver: MemoryDataProviderName}
+		if err := createProvider(t.TempDir()); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := provider.(*MemoryProvider); !ok {
+			t.Fatalf("provider %T", provider)
+		}
+	})
 }
 
 func TestEDIIAMFailuresAreClassifiedAndRedacted(t *testing.T) {

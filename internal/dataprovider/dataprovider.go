@@ -2663,6 +2663,9 @@ func Close() error {
 }
 
 func createProvider(basePath string) error {
+	if config.AWSIAMAuth && config.Driver != PGSQLDataProviderName {
+		return fmt.Errorf("aws_iam_auth: requires the %q driver, not %q", PGSQLDataProviderName, config.Driver)
+	}
 	sqlPlaceholders = getSQLPlaceholders()
 	if err := validateSQLTablesPrefix(); err != nil {
 		return err
