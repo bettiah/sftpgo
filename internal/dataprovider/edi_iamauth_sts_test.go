@@ -10,6 +10,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -400,5 +401,30 @@ func TestEDIIAMConcurrentWaitersShareRefresh(t *testing.T) {
 	}
 	if sts.requests.Load() != before+1 {
 		t.Fatal("no fresh refresh after expiry")
+	}
+}
+
+// The loader's retryer carries the attempt limit and the backoff cap, so a refresh budget is
+// attempts × request timeout plus at most one capped backoff.
+func TestEDIIAMRetryBudget(t *testing.T) {
+	ediIAMSetup(t)
+	t.Setenv("AWS_REGION", "eu-west-1")
+	iamSTSMaxBackoff = 50 * time.Millisecond
+	cfg, err := iamLoadAWSConfig(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := cfg.Retryer()
+	if r.MaxAttempts() != iamSTSMaxAttempts {
+		t.Fatalf("max attempts %d, want %d", r.MaxAttempts(), iamSTSMaxAttempts)
+	}
+	for range 50 {
+		d, err := r.RetryDelay(1, errors.New("fixture"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if d > iamSTSMaxBackoff {
+			t.Fatalf("retry backoff %v exceeds the %v cap", d, iamSTSMaxBackoff)
+		}
 	}
 }
