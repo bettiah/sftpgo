@@ -410,8 +410,9 @@ func TestEDIIAMConcurrentWaitersShareRefresh(t *testing.T) {
 	}
 }
 
-// The loader's retryer carries the attempt limit and the backoff cap, so a refresh budget is
-// attempts × request timeout plus at most one capped backoff.
+// The loader's retryer carries the attempt limit and the backoff cap, so a direct web identity
+// refresh in the SDK's default retry mode (ediIAMSetup unsets AWS_NEW_RETRIES_2026) is bounded
+// by attempts × request timeout plus at most one capped backoff.
 func TestEDIIAMRetryBudget(t *testing.T) {
 	ediIAMSetup(t)
 	t.Setenv("AWS_REGION", "eu-west-1")

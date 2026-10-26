@@ -237,7 +237,9 @@ func ediIAMSetup(t *testing.T) string {
 	t.Setenv("HOME", home)
 	for _, name := range append([]string{"PGHOST", "PGPORT", "PGUSER", "PGDATABASE", "PGSSLMODE", "PGSSLROOTCERT",
 		"AWS_REGION", "AWS_DEFAULT_REGION", "AWS_PROFILE", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
-		"AWS_ROLE_ARN", "AWS_WEB_IDENTITY_TOKEN_FILE", "AWS_CONTAINER_CREDENTIALS_FULL_URI", "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI"},
+		"AWS_ROLE_ARN", "AWS_WEB_IDENTITY_TOKEN_FILE", "AWS_CONTAINER_CREDENTIALS_FULL_URI", "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+		// The STS refresh budget and attempt counts are qualified in the SDK's default retry mode.
+		"AWS_NEW_RETRIES_2026"},
 		pgsqlIAMRefusedEnv...) {
 		t.Setenv(name, "")
 		if err := os.Unsetenv(name); err != nil {

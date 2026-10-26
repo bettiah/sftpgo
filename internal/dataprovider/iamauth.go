@@ -58,11 +58,15 @@ var errPGSQLIAMTokenBuild = errors.New("unable to build the RDS IAM auth token")
 // timeout. A refresh against an endpoint that accepts the connection and never answers would
 // therefore stay pending, and every later connect would wait on it. The STS client used here
 // gets finite connect, response and request timeouts, a bounded number of attempts and a
-// capped retry backoff, so a refresh always ends (at most iamSTSMaxAttempts ×
-// iamSTSRequestTimeout plus one iamSTSMaxBackoff, about 9 s; the SDK default backoff would be
-// up to about 2 s for the first retry) and the next connect after the network recovers starts
-// a fresh one. iamTokenTimeout separately bounds how long a connect waits in the hook, which
-// pgx runs before its own connect_timeout applies.
+// capped retry backoff, so a refresh always ends and the next connect after the network
+// recovers starts a fresh one. For direct IRSA web identity (one STS operation) in the SDK's
+// default retry mode, a refresh takes at most iamSTSMaxAttempts × iamSTSRequestTimeout plus
+// one iamSTSMaxBackoff, about 9 s; the SDK default backoff would be up to about 2 s for the
+// first retry. That figure does not hold elsewhere: AWS_NEW_RETRIES_2026=true lets an
+// X-Amz-Retry-After header add up to 5 s to a backoff, and a chained AssumeRole profile makes
+// several STS operations. Those refreshes still end, only later. iamTokenTimeout separately
+// bounds how long a connect waits in the hook, in every mode, and pgx runs that hook before
+// its own connect_timeout applies.
 var (
 	iamTokenTimeout       = 10 * time.Second
 	iamSTSConnectTimeout  = 2 * time.Second

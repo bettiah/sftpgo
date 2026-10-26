@@ -143,16 +143,30 @@ Startup refuses, before any connection or token build: a driver other than `post
 target_session_attrs default_query_exec_mode`; and, on the parsed configuration, any password
 (which also catches a default `~/.pgpass` entry or a service file), more than one host or any
 fallback, TLS other than verify-full, and no region. The generated connection string has no
-password key, and IAM mode never logs the connection string; a parse error's quoted string is
-replaced by `[redacted]`.
+password key, and IAM mode never logs the connection string. A parse error is reduced to a
+fixed, secret-free class (for example `malformed URI`, `invalid port`, or a disallowed key
+named only when it is a known libpq/pgx key); the parser's own text, which can quote the
+connection string, is never returned or logged.
 
 The credential client is bounded, because the SDK cache runs a shared refresh under a context
 without deadline and the default HTTP client has no response timeout: connect and TLS
-handshake 2 s, response headers 3 s, each request 4 s, at most 2 attempts. A refresh against
-an endpoint that accepts the connection and never answers therefore ends, and the next
-connect after recovery starts a new one without a restart. Each connect waits at most 10 s in
-the hook, which pgx runs before the DSN's `connect_timeout` applies; a caller's cancellation
-also ends its wait.
+handshake 2 s, response headers 3 s, each request 4 s, at most 2 attempts, retry backoff capped
+at 1 s. A refresh against an endpoint that accepts the connection and never answers therefore
+ends, and the next connect after recovery starts a new one without a restart. For direct IRSA
+web identity in the SDK's default retry mode a refresh takes at most about 9 s; with
+`AWS_NEW_RETRIES_2026=true` (an `X-Amz-Retry-After` header can add up to 5 s to a backoff) or a
+chained AssumeRole profile it can take longer, but still ends. Each connect waits at most 10 s
+in the hook in every mode, and pgx runs that hook before the DSN's `connect_timeout` applies; a
+caller's cancellation also ends its wait.
+
+The pinned SDK's web identity provider dereferences the AssumeRoleWithWebIdentity result
+without checking it, so a 200 response missing its credentials (an empty body from an
+intercepting proxy, for example) would panic in the credentials cache's refresh goroutine and
+end the process. Both shipped AWS configuration loaders, this one and the S3 filesystem's, wrap
+the web identity STS client (`internal/awscreds`), which turns a response without an access key,
+secret, session token or expiration into an ordinary credentials error; the next retrieval
+retries. Only web identity is guarded: an S3 `role_arn` (AssumeRole, which our provisioning never
+sets), a chained AssumeRole profile and the `awscontainer` build tag's loader are not.
 
 Failure signal: every failed token build logs one Error line starting
 `iam auth: token build failed` (class `credentials`, `signer`, `timeout` or `canceled`, plus an
@@ -161,8 +175,12 @@ starting `iam auth: connect failed` (class `auth`, `server`, `tls`, `timeout`, `
 `network` or `other`, plus the SQLSTATE when one exists). A failed build is not also logged as a
 connect failure. Both lines carry non-secret counters (`builds`, `build_failures`,
 `connect_attempts`, `connects`, `connect_failures`) and the expiry of the credentials last used.
-The first success after failures logs one Info line starting `iam auth recovered:`. Lines
-carry no token, key, raw SDK error or connection string. There is no new Prometheus series,
+The first success after failures logs one Info line starting `iam auth recovered:`. An
+incomplete STS response is a `credentials` build failure. Healthy activity is visible without
+matching the failure prefix: one Info line starting `iam auth credentials: expiry changed`
+whenever the expiry of the credentials in use changes (so each refresh shows), and one Debug
+line starting `iam auth connect ok` per physical connect. Lines carry no token, key, raw SDK
+error or connection string. There is no new Prometheus series,
 and `/healthz` is unchanged: it does not check the database.
 
 The connection lifetime stays 240 s and idle time 120 s, so during an STS outage new connects
