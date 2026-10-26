@@ -32,6 +32,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/stdlib"
 
+	"github.com/drakkan/sftpgo/v2/internal/awscreds"
 	"github.com/drakkan/sftpgo/v2/internal/logger"
 )
 
@@ -72,6 +73,7 @@ var (
 	iamLoadAWSConfig      = func(ctx context.Context, region string) (aws.Config, error) {
 		opts := []func(*awsconfig.LoadOptions) error{
 			awsconfig.WithHTTPClient(newIAMHTTPClient()),
+			awscreds.GuardWebIdentity(),
 			awsconfig.WithRetryer(func() aws.Retryer {
 				return retry.NewStandard(func(o *retry.StandardOptions) {
 					o.MaxAttempts = iamSTSMaxAttempts

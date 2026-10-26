@@ -16,6 +16,9 @@ go test -race -tags "edi,$SFTPGO_BUILD_TAGS" internal/sftpd/handler.go internal/
 go test -race -tags "edi,$SFTPGO_BUILD_TAGS" internal/config/edi_limits_test.go
 go test -race ./internal/version
 go test -race -tags "edi,$SFTPGO_BUILD_TAGS" internal/config/edi_iam_config_test.go
+# Web identity guard: the shared source, the S3 filesystem path and (below) the IAM auth path.
+go test -race -tags "edi,$SFTPGO_BUILD_TAGS" internal/awscreds/webidentity.go internal/awscreds/edi_webidentity_test.go
+go test -race -tags "$SFTPGO_BUILD_TAGS" ./internal/vfs -run '^TestEDIS3WebIdentityGuard$'
 # RDS IAM auth: the package's non-test files for this profile plus the edi tests (go list -tags "$SFTPGO_BUILD_TAGS" ./internal/dataprovider).
 iam_files=(
   actions.go admin.go apikey.go bolt_disabled.go cachedpassword.go cacheduser.go configs.go

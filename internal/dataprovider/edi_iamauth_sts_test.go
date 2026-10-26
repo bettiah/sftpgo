@@ -31,9 +31,11 @@ type ediFakeSTS struct {
 	srv       *httptest.Server
 	stall     atomic.Bool
 	bodyStall atomic.Bool
-	requests  atomic.Int64
-	keyID     string
-	release   chan struct{}
+	// omit names a credential element to leave out of a 200 response; "body" sends no body.
+	omit     atomic.Value
+	requests atomic.Int64
+	keyID    string
+	release  chan struct{}
 }
 
 func (f *ediFakeSTS) handler() http.Handler {
@@ -58,6 +60,10 @@ func (f *ediFakeSTS) handler() http.Handler {
 			panic(http.ErrAbortHandler)
 		}
 		w.Header().Set("Content-Type", "text/xml")
+		if omit, _ := f.omit.Load().(string); omit != "" {
+			_, _ = io.WriteString(w, ediIncompleteSTSBody(omit))
+			return
+		}
 		// Short-lived credentials, so that every connect a second later refreshes again.
 		fmt.Fprintf(w, `<AssumeRoleWithWebIdentityResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
 <AssumeRoleWithWebIdentityResult><Credentials><AccessKeyId>%s</AccessKeyId><SecretAccessKey>fixture-sts-secret</SecretAccessKey>
@@ -427,4 +433,47 @@ func TestEDIIAMRetryBudget(t *testing.T) {
 			t.Fatalf("retry backoff %v exceeds the %v cap", d, iamSTSMaxBackoff)
 		}
 	}
+}
+
+// ediIncompleteSTSBody renders a 200 AssumeRoleWithWebIdentity response that lacks omit.
+func ediIncompleteSTSBody(omit string) string {
+	if omit == "body" {
+		return ""
+	}
+	elements := []string{"<AccessKeyId>ASIAINCOMPLETE</AccessKeyId>", "<SecretAccessKey>fixture-sts-secret</SecretAccessKey>",
+		"<SessionToken>fixture-sts-session</SessionToken>", "<Expiration>" + time.Now().Add(time.Hour).UTC().Format(time.RFC3339) + "</Expiration>"}
+	var kept []string
+	for _, e := range elements {
+		if !strings.HasPrefix(e, "<"+omit+">") {
+			kept = append(kept, e)
+		}
+	}
+	creds := "<Credentials>" + strings.Join(kept, "") + "</Credentials>"
+	if omit == "Credentials" {
+		creds = ""
+	}
+	return `<AssumeRoleWithWebIdentityResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/"><AssumeRoleWithWebIdentityResult>` +
+		creds + `</AssumeRoleWithWebIdentityResult></AssumeRoleWithWebIdentityResponse>`
+}
+
+// An empty 200 or a response missing any credential field fails the connect with the
+// failure line instead of crashing the process, and the same pool recovers afterwards.
+func TestEDIIAMIncompleteSTSResponses(t *testing.T) {
+	logPath := ediIAMSetup(t)
+	pg := ediStartFakePG(t)
+	sts := ediStartFakeSTS(t, nil)
+	ediWebIdentityEnv(t, sts.srv.URL, ediSTSCertPEM(sts))
+	db, a := ediIAMHandle(t, pg)
+	modes := []string{"body", "Credentials", "AccessKeyId", "SecretAccessKey", "SessionToken", "Expiration"}
+	for _, mode := range modes {
+		sts.omit.Store(mode)
+		if err := db.PingContext(context.Background()); err == nil {
+			t.Fatalf("omit %s: connect succeeded", mode)
+		}
+	}
+	if n := strings.Count(ediReadLog(t, logPath), ediBuildFailed+", class: credentials"); n != len(modes) || a.buildFailures.Load() != int64(len(modes)) {
+		t.Fatalf("%d credentials-class failure lines for %d incomplete responses", n, len(modes))
+	}
+	sts.omit.Store("")
+	ediPingUntilOK(t, db)
 }

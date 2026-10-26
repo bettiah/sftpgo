@@ -51,6 +51,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/pkg/sftp"
 
+	"github.com/drakkan/sftpgo/v2/internal/awscreds"
 	"github.com/drakkan/sftpgo/v2/internal/logger"
 	"github.com/drakkan/sftpgo/v2/internal/metric"
 	"github.com/drakkan/sftpgo/v2/internal/util"
@@ -108,6 +109,7 @@ func NewS3Fs(connectionID, localTempDir, mountPath string, s3Config S3FsConfig) 
 
 	awsConfig, err := config.LoadDefaultConfig(ctx, config.WithHTTPClient(
 		getAWSHTTPClient(0, 30*time.Second, fs.config.SkipTLSVerify)),
+		awscreds.GuardWebIdentity(),
 	)
 	if err != nil {
 		return fs, fmt.Errorf("unable to get AWS config: %w", err)
