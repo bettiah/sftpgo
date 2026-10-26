@@ -37,7 +37,6 @@ func TestEDIIAMLocalPostgres(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer admin.Close(context.Background())
 	name := "edi_iam_" + ediRandomHex(t)
 	password := "throwaway-" + ediRandomHex(t)
 	exec := func(sql string) {
@@ -47,11 +46,16 @@ func TestEDIIAMLocalPostgres(t *testing.T) {
 		}
 	}
 	exec(`CREATE ROLE "` + name + `" LOGIN PASSWORD '` + password + `'`)
+	// Registered before the pool's cleanup, so it runs after the pool is closed. The admin
+	// connection closes only here, and a failed drop fails the test.
 	t.Cleanup(func() {
 		ctx := context.Background()
-		_, _ = admin.Exec(ctx, `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '`+name+`'`)
-		_, _ = admin.Exec(ctx, `DROP DATABASE IF EXISTS "`+name+`"`)
-		_, _ = admin.Exec(ctx, `DROP ROLE IF EXISTS "`+name+`"`)
+		defer admin.Close(ctx)
+		for _, sql := range []string{`DROP DATABASE IF EXISTS "` + name + `" WITH (FORCE)`, `DROP ROLE IF EXISTS "` + name + `"`} {
+			if _, err := admin.Exec(ctx, sql); err != nil {
+				t.Errorf("cleanup %q: %v", sql, err)
+			}
+		}
 	})
 	exec(`CREATE DATABASE "` + name + `" OWNER "` + name + `"`)
 
@@ -77,7 +81,7 @@ func TestEDIIAMLocalPostgres(t *testing.T) {
 	config.PoolSize = 1
 	pgsqlConnMaxLifetime = 300 * time.Millisecond
 	db := openPGSQLIAMHandle(cfg, a)
-	defer db.Close()
+	t.Cleanup(func() { _ = db.Close() })
 	setPGSQLPoolLimits(db)
 
 	pids := map[int]bool{}
