@@ -11,6 +11,7 @@ import (
 	"database/sql"
 	"encoding/pem"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -29,14 +30,22 @@ type ediFakeSTS struct {
 	stall    atomic.Bool
 	requests atomic.Int64
 	keyID    string
+	release  chan struct{}
 }
 
 func (f *ediFakeSTS) handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.requests.Add(1)
+		// Reading the body lets net/http cancel the request context when the client hangs up.
+		_, _ = io.Copy(io.Discard, r.Body)
 		if f.stall.Load() {
-			<-r.Context().Done()
-			return
+			select {
+			case <-r.Context().Done():
+			case <-f.release:
+			}
+			// Abort rather than answer: an empty 200 makes the SDK's web identity provider
+			// dereference nil credentials and crash the process.
+			panic(http.ErrAbortHandler)
 		}
 		w.Header().Set("Content-Type", "text/xml")
 		// Short-lived credentials, so that every connect a second later refreshes again.
@@ -52,7 +61,7 @@ func (f *ediFakeSTS) handler() http.Handler {
 // ediStartFakeSTS serves TLS on a new port, or plain HTTP on ln when it is given.
 func ediStartFakeSTS(t *testing.T, ln net.Listener) *ediFakeSTS {
 	t.Helper()
-	f := &ediFakeSTS{keyID: "ASIAEDISTSFIXTURE"}
+	f := &ediFakeSTS{keyID: "ASIAEDISTSFIXTURE", release: make(chan struct{})}
 	f.srv = httptest.NewUnstartedServer(f.handler())
 	if ln != nil {
 		f.srv.Listener = ln
@@ -61,6 +70,7 @@ func ediStartFakeSTS(t *testing.T, ln net.Listener) *ediFakeSTS {
 		f.srv.StartTLS()
 	}
 	t.Cleanup(func() {
+		close(f.release)
 		f.srv.CloseClientConnections()
 		f.srv.Close()
 	})

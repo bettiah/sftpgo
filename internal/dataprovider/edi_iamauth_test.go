@@ -467,7 +467,7 @@ func TestEDIIAMTokenPerPhysicalConnect(t *testing.T) {
 	if got := a.connectAttempts.Load(); got != int64(len(pwds)) || a.connects.Load() != got || a.builds.Load() != got {
 		t.Fatalf("hook calls %d, connects %d, builds %d, server connects %d", got, a.connects.Load(), a.builds.Load(), len(pwds))
 	}
-	prefix := "localhost:" + strconv.Itoa(s.port) + "/?Action=connect&DBUser=sftpgo_app&"
+	prefix := "localhost:" + strconv.Itoa(s.port) + "?Action=connect&DBUser=sftpgo_app&"
 	for i, pw := range pwds {
 		if users[i] != "sftpgo_app" || !strings.HasPrefix(pw, prefix) ||
 			!strings.Contains(pw, "X-Amz-Credential="+ediIAMAccessKey+"%2F") ||
@@ -534,7 +534,8 @@ func TestEDIIAMFailuresAreClassifiedAndRedacted(t *testing.T) {
 func TestEDIIAMFailureSignalFiresAndStops(t *testing.T) {
 	logPath := ediIAMSetup(t)
 	s := ediStartFakePG(t)
-	creds := &ediFakeCreds{secret: "fixture-secret-" + ediRandomHex(t), expires: time.Now().Add(time.Hour)}
+	// Already expired, so the cache refreshes on every build and a credentials failure shows.
+	creds := &ediFakeCreds{secret: "fixture-secret-" + ediRandomHex(t), expires: time.Now().Add(-time.Second)}
 	iamLoadAWSConfig = ediFakeAWS(creds, "eu-west-1")
 	var signerFails atomic.Bool
 	realBuild := iamBuildToken
